@@ -1,13 +1,13 @@
 # Server Performance Monitoring Platform
 
-## Project Overview
 Comprehensive server monitoring platform using Zabbix with Grafana dashboards.
 
-**Timeline**: September 2014 - December 2014  
-**Technology Stack**: Zabbix, Python, PostgreSQL, Grafana, SNMP, WMI  
-**Role**: IT Administrator - Etech Eritrea PLC
+> **Status: not implemented.** This repository holds design notes only — a sketch of what Zabbix + Grafana server monitoring would look like. There is no code here. It is kept as a written-up idea, not as a working project.
 
-## Features
+## Sketched scope
+
+Features the design called for, none of which are built:
+
 - Real-time server performance monitoring
 - Custom Zabbix templates and triggers
 - Grafana visualization dashboards
@@ -17,22 +17,3 @@ Comprehensive server monitoring platform using Zabbix with Grafana dashboards.
 - API endpoints for integration
 - Performance optimization tools
 
-## Architecture
-- **Zabbix Server**: Core monitoring engine
-- **PostgreSQL**: Monitoring data storage
-- **Grafana**: Visualization and dashboards
-- **Python Collectors**: Custom metric collection
-- **API Layer**: External integrations
-
-## Setup
-```bash
-# Install Zabbix
-sudo yum install zabbix-server-pgsql zabbix-web-pgsql
-
-# Configure database
-sudo -u postgres createdb zabbix
-zcat /usr/share/doc/zabbix-server-pgsql*/create.sql.gz | sudo -u zabbix psql zabbix
-
-# Start services
-sudo systemctl start zabbix-server grafana-server
-```
