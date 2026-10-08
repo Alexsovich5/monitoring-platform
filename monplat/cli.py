@@ -52,6 +52,17 @@ def build_parser():
                               '(default: mp-collector)')
     collect.set_defaults(func=cmd_collect)
 
+    fc = commands.add_parser(
+        'forecast', help='forecast hours until configured items reach '
+                         'their threshold and send them to Zabbix')
+    fmode = fc.add_mutually_exclusive_group()
+    fmode.add_argument('--once', action='store_true',
+                       help='forecast once and exit')
+    fmode.add_argument('--interval', metavar='SECONDS', type=int,
+                       default=300,
+                       help='seconds between forecasts (default: 300)')
+    fc.set_defaults(func=cmd_forecast)
+
     dash = commands.add_parser(
         'dashboards', help='generate Grafana dashboards from the template '
                            'specs')
@@ -147,6 +158,30 @@ def cmd_collect(args):
                                host=args.host, keys=keys)
     except sender.SenderError as exc:
         sys.stderr.write('mpctl collect: %s\n' % exc)
+        return 1
+    except KeyboardInterrupt:
+        return 0
+    print('processed: %(processed)d; failed: %(failed)d; total: %(total)d'
+          % result)
+    return 0 if result['failed'] == 0 else 1
+
+
+def cmd_forecast(args):
+    import psycopg2
+
+    from monplat import config, forecast, history
+    from monplat.zabbix import sender
+
+    try:
+        cfg = config.load()
+    except config.ConfigError as exc:
+        sys.stderr.write('mpctl forecast: %s\n' % exc)
+        return 1
+    try:
+        result = forecast.run(cfg, once=args.once, interval=args.interval)
+    except (sender.SenderError, psycopg2.Error, history.UnknownItem,
+            history.UnsupportedValueType) as exc:
+        sys.stderr.write('mpctl forecast: %s\n' % exc)
         return 1
     except KeyboardInterrupt:
         return 0

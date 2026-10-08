@@ -23,6 +23,17 @@ services:
     depends_on:
       - zabbix
 
+  forecast:
+    image: monitoring-platform:app
+    command: ["mpctl", "forecast", "--interval", "300"]
+    volumes:
+      - .:/app
+    working_dir: /app
+    restart: unless-stopped
+    depends_on:
+      - db
+      - zabbix
+
   snmpsim:
     image: monitoring-platform:app
     # snmpsim drops to nobody before binding, so it listens on UDP 1161.
