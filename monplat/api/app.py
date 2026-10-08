@@ -1,4 +1,5 @@
-"""Flask application serving hosts, items and item history as JSON.
+"""Flask application serving hosts, items and item history as JSON, plus
+the Graphite find and render endpoints from ``monplat.api.graphite``.
 
 Everything is read straight from the Zabbix PostgreSQL database; the
 ``monplat`` database is only checked by the health endpoint here.
@@ -11,9 +12,12 @@ import psycopg2
 from flask import Flask, Response, current_app, request
 
 from monplat import config, db, history
+from monplat.api import graphite
 from monplat.timeparse import TimeParseError, parse_time
 
 DEFAULT_FROM = '-1h'
+# Graphite's own default render range is the last 24 hours.
+RENDER_DEFAULT_FROM = '-1d'
 DEFAULT_UNTIL = 'now'
 MONITORED = 0
 # hosts.flags: 0 = plain host, 4 = discovered host. Host prototypes (2)
@@ -137,6 +141,53 @@ def item_history(itemid):
                           for value, clock in points])
 
 
+def _form_time(name, default, now):
+    try:
+        return parse_time(request.values.get(name) or default, now)
+    except TimeParseError as exc:
+        raise BadRequest('%s: %s' % (name, exc))
+
+
+def metrics_find():
+    query_text = request.values.get('query')
+    if not query_text:
+        raise BadRequest('query is required, e.g. query=zabbix.*')
+    with connection() as conn:
+        nodes = graphite.find(conn, query_text)
+    return json_response(nodes)
+
+
+def render():
+    fmt = request.values.get('format') or 'json'
+    if fmt != 'json':
+        raise BadRequest('format %r is not supported; only format=json'
+                         % fmt)
+    now = int(time.time())
+    start = _form_time('from', RENDER_DEFAULT_FROM, now)
+    end = _form_time('until', DEFAULT_UNTIL, now)
+    if start > end:
+        raise BadRequest('from (%d) is after until (%d)' % (start, end))
+    raw = request.values.get('maxDataPoints')
+    max_points = None
+    if raw:
+        try:
+            max_points = int(raw)
+        except ValueError:
+            max_points = 0
+        if max_points <= 0:
+            raise BadRequest('maxDataPoints must be a positive integer, '
+                             'got %r' % raw)
+    targets = request.values.getlist('target')
+    try:
+        for target in targets:
+            graphite.parse_target(target)
+    except graphite.TargetError as exc:
+        raise BadRequest(str(exc))
+    with connection() as conn:
+        series = graphite.render(conn, targets, start, end, max_points)
+    return json_response(series)
+
+
 def _error(exc):
     return json_response({'error': str(exc)}, exc.status)
 
@@ -160,6 +211,9 @@ def create_app(cfg=None):
     app.add_url_rule('/api/v1/hosts/<host>/items', 'host_items', host_items)
     app.add_url_rule('/api/v1/items/<int:itemid>/history', 'item_history',
                      item_history)
+    app.add_url_rule('/metrics/find/', 'metrics_find', metrics_find,
+                     methods=['GET', 'POST'])
+    app.add_url_rule('/render', 'render', render, methods=['GET', 'POST'])
     app.register_error_handler(BadRequest, _error)
     app.register_error_handler(NotFound, _error)
     app.register_error_handler(404, _not_found)
