@@ -6,7 +6,7 @@ import xmlrpclib
 
 import pytest
 
-from monplat import config
+from monplat import config, templates
 from monplat.zabbix import api, sender
 
 STOCK_HOST = 'Zabbix server'
@@ -90,3 +90,45 @@ def agent_get(key, host='zabbix', port=10050, timeout=10):
         raise AssertionError('agent reply has no ZBXD header: %r' % data)
     length = struct.unpack('<Q', data[5:13])[0]
     return data[13:13 + length]
+
+
+LINUX_TEMPLATE = 'Template MP Linux'
+TEST_HOST_GROUP = 'MP Servers'
+TEST_HOSTS = ('mp-test-collect', 'mp-test-alert', 'mp-test-forecast')
+
+
+@pytest.fixture(scope='session')
+def test_hosts(zapi):
+    """Trapper-only hosts, one per integration module that sends data,
+    each in group MP Servers and linked to Template MP Linux.  The
+    template itself comes from the Makefile's ``mpctl provision`` step.
+    Returns ``{host name: hostid}``."""
+    found = zapi.template.get(filter={'host': LINUX_TEMPLATE},
+                              output=['templateid'])
+    if not found:
+        pytest.fail('%s is missing; run "mpctl provision" first'
+                    % LINUX_TEMPLATE)
+    templateid = found[0]['templateid']
+    groupid, _ = api.get_or_create(zapi, 'hostgroup',
+                                   {'name': TEST_HOST_GROUP},
+                                   {'name': TEST_HOST_GROUP})
+    hostids = {}
+    for name in TEST_HOSTS:
+        hosts = zapi.host.get(filter={'host': name}, output=['hostid'],
+                              selectParentTemplates=['templateid'])
+        if not hosts:
+            created = zapi.host.create(host=name,
+                                       groups=[{'groupid': groupid}],
+                                       interfaces=[dict(
+                                           templates.TRAPPER_ONLY_INTERFACE)])
+            hostid = created['hostids'][0]
+            linked = False
+        else:
+            hostid = hosts[0]['hostid']
+            linked = templateid in [t['templateid']
+                                    for t in hosts[0]['parentTemplates']]
+        if not linked:
+            zapi.host.massadd(hosts=[{'hostid': hostid}],
+                              templates=[{'templateid': templateid}])
+        hostids[name] = hostid
+    return hostids

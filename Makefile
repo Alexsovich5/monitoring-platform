@@ -9,6 +9,7 @@ unit:
 integration: down
 	docker compose up -d $(STACK)
 	docker compose run --rm --no-deps app scripts/wait_for_stack.sh
+	docker compose run --rm app mpctl provision
 	docker compose run --rm --no-deps --use-aliases app py.test -q -m integration tests/integration
 
 test: unit integration

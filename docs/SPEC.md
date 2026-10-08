@@ -220,6 +220,10 @@ Item `type` values: `trapper` (Zabbix type 2), `agent` (0), `snmpv2` (4, needs
 `snmp_oid` and `snmp_community`). `value_type` values: `float` (0) and
 `unsigned` (3). `severity` values: not_classified … disaster (0–5).
 
+A host declared with `interfaces: []` has only trapper items. Zabbix 2.4
+rejects `host.create` without interfaces, so such a host is created with a
+placeholder agent interface (`127.0.0.1:10050`) that none of its items poll.
+
 Host-template links are added with `host.massadd` (templates), never with a
 replacing `host.update templates=[...]`, so templates already linked to a host
 (for example Template OS Linux on `Zabbix server`) stay linked.

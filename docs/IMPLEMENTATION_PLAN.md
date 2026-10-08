@@ -138,11 +138,11 @@ Conventions used in every task:
 - **Goal:** Templates and triggers as code, idempotent (SPEC feature 2).
 - **Files:**
   - create `monplat/templates.py` (`load_specs`, `validate`, `plan`, `apply`)
-  - create `config/templates/mp-linux.yml` (trapper items for CPU util, load1, mem pused, fs pused `/`, net in/out bytes and `mp.forecast.hours_left[/]`; triggers for high CPU, low memory, FS > 90 % and forecast < horizon; host `mp-collector` with no interface, because it has only trapper items)
+  - create `config/templates/mp-linux.yml` (trapper items for CPU util, load1, mem pused, fs pused `/`, net in/out bytes and `mp.forecast.hours_left[/]`; triggers for high CPU, low memory, FS > 90 % and forecast < horizon; host `mp-collector` declared with `interfaces: []`, because it has only trapper items; Zabbix 2.4.3's `host.create` rejects a host without interfaces (`No interfaces for host`), so `templates.py` creates such a host with a placeholder agent interface `127.0.0.1:10050` that none of its items poll)
   - modify `monplat/cli.py` to add `mpctl provision [--templates] [--dry-run]`
   - host-template links use `host.massadd` with `templates`, never a replacing `host.update templates=[...]`
   - modify `Makefile` so that `integration` runs `docker compose run --rm app mpctl provision` once after `scripts/wait_for_stack.sh` and before pytest (see Conventions)
-  - modify `tests/integration/conftest.py` to add a session fixture `test_hosts` that creates (idempotently, after the Makefile's provision step has created Template MP Linux) `mp-test-collect`, `mp-test-alert` and `mp-test-forecast` (trapper-only, group MP Servers, linked to Template MP Linux), one per integration module that sends data
+  - modify `tests/integration/conftest.py` to add a session fixture `test_hosts` that creates (idempotently, after the Makefile's provision step has created Template MP Linux) `mp-test-collect`, `mp-test-alert` and `mp-test-forecast` (trapper-only with the same placeholder agent interface, group MP Servers, linked to Template MP Linux), one per integration module that sends data
   - create `tests/unit/test_templates.py`, `tests/integration/test_provision.py`
 - **Tests first:**
   - unit: validation rejects an unknown item type, a missing key, an SNMP item without an OID, and a trigger expression that references an undefined key

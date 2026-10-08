@@ -1,0 +1,21 @@
+# Host metrics pushed by "mpctl collect" and the disk forecast pushed by
+# "mpctl forecast".  Every item is a trapper item, so mp-collector needs no
+# interface.
+template: Template MP Linux
+group: MP Templates
+applications: [CPU, Memory, Filesystem, Network, Forecast]
+items:
+  - {key: "mp.cpu.util", name: "CPU utilisation", type: trapper, value_type: float, units: "%", application: CPU}
+  - {key: "mp.load1", name: "Load average (1 min)", type: trapper, value_type: float, units: "", application: CPU}
+  - {key: "mp.mem.pused", name: "Memory used", type: trapper, value_type: float, units: "%", application: Memory}
+  - {key: "mp.fs.pused[/]", name: "Root FS used", type: trapper, value_type: float, units: "%", application: Filesystem}
+  - {key: "mp.net.in.bytes", name: "Network bytes received", type: trapper, value_type: unsigned, units: B, application: Network}
+  - {key: "mp.net.out.bytes", name: "Network bytes sent", type: trapper, value_type: unsigned, units: B, application: Network}
+  - {key: "mp.forecast.hours_left[/]", name: "Hours until / reaches threshold", type: trapper, value_type: float, units: h, application: Forecast}
+triggers:
+  - {name: "High CPU on {HOST.NAME}", expression: "{Template MP Linux:mp.cpu.util.avg(5m)}>90", severity: high}
+  - {name: "Low free memory on {HOST.NAME}", expression: "{Template MP Linux:mp.mem.pused.last()}>95", severity: average}
+  - {name: "Root FS over 90% on {HOST.NAME}", expression: "{Template MP Linux:mp.fs.pused[/].last()}>90", severity: high}
+  - {name: "Root FS full within horizon on {HOST.NAME}", expression: "{Template MP Linux:mp.forecast.hours_left[/].last()}<24", severity: warning}
+hosts:
+  - {host: mp-collector, groups: [MP Servers], interfaces: []}
