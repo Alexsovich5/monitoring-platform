@@ -62,6 +62,7 @@ services:
       POSTGRES_PASSWORD: postgres
     volumes:
       - ./docker/db/init:/docker-entrypoint-initdb.d:ro
+      - ./sql:/sql:ro
       - dbdata:/var/lib/postgresql/data
 
   zabbix:

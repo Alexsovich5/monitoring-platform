@@ -1,0 +1,30 @@
+# Alert wiring created by "mpctl provision": the "MP API" script media
+# type runs docker/zabbix/alertscripts/mp_alert.py, Admin's media of that
+# type sends to the API's event endpoint, and the action "MP notify API"
+# sends every PROBLEM and its recovery through it.
+media_type:
+  description: MP API
+  type: 1                            # script
+  exec_path: mp_alert.py             # in AlertScriptsPath
+user_media:
+  user: Admin
+  sendto: http://api:5000/api/v1/events
+  severity: 63                       # all six severities
+  period: "1-7,00:00-24:00"
+action:
+  name: MP notify API
+  esc_period: 60
+  recovery_msg: 1
+  subject: "{TRIGGER.STATUS}: {TRIGGER.NAME}"
+  recovery_subject: "{TRIGGER.STATUS}: {TRIGGER.NAME}"
+  message: |
+    eventid={EVENT.ID}
+    status={TRIGGER.STATUS}
+    host={HOST.NAME}
+    trigger_id={TRIGGER.ID}
+    trigger_name={TRIGGER.NAME}
+    severity={TRIGGER.NSEVERITY}
+    value={ITEM.VALUE}
+    time={EVENT.DATE} {EVENT.TIME}
+  conditions:
+    - {conditiontype: 5, operator: 0, value: 1}   # Trigger value = PROBLEM

@@ -28,6 +28,9 @@ def build_parser():
     provision.add_argument('--templates', metavar='DIR', default=None,
                            help='template spec directory '
                                 '(default: config/templates)')
+    provision.add_argument('--actions', metavar='FILE', default=None,
+                           help='alert media type, user media and action '
+                                '(default: config/actions.yml)')
     provision.add_argument('--dry-run', action='store_true',
                            help='print the planned changes without '
                                 'applying them')
@@ -81,13 +84,14 @@ def cmd_provision(args):
     import requests
     from pyzabbix import ZabbixAPIException
 
-    from monplat import config, templates
+    from monplat import actions, config, templates
     from monplat.zabbix import api
 
     try:
         specs = templates.load_specs(args.templates or templates.DEFAULT_DIR)
         for spec in specs:
             templates.validate(spec)
+        alerting = actions.load(args.actions or actions.DEFAULT_PATH)
     except templates.SpecError as exc:
         sys.stderr.write('mpctl provision: %s\n' % exc)
         return 2
@@ -100,8 +104,11 @@ def cmd_provision(args):
     try:
         cfg = config.load()
         zapi = api.connect(cfg)
-        for spec in specs:
-            changes = templates.plan(zapi, spec)
+        # Templates first, then the alert media type, media and action.
+        plans = ([(templates.plan, spec) for spec in specs] +
+                 [(actions.plan, alerting)])
+        for plan, spec in plans:
+            changes = plan(zapi, spec)
             for change in changes:
                 print('%-9s %-11s %s' % (change.action, change.obj,
                                          change.name))

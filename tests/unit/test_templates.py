@@ -151,8 +151,11 @@ def test_load_specs_rejects_non_mapping(tmpdir):
 def empty_zabbix():
     zapi = mock.MagicMock()
     for obj in ('hostgroup', 'template', 'application', 'item', 'trigger',
-                'host'):
+                'host', 'mediatype', 'action'):
         getattr(zapi, obj).get.return_value = []
+    # Read by the alert media/action step of "mpctl provision".
+    zapi.user.get.return_value = [{'userid': '1', 'alias': 'Admin',
+                                   'medias': []}]
     return zapi
 
 
@@ -364,7 +367,8 @@ def test_provision_dry_run_makes_no_api_writes(tmpdir, capsys):
     assert write_calls(zapi) == []
     out, _ = capsys.readouterr()
     assert 'create' in out and 'Template T' in out
-    assert 'created: 8; updated: 0; unchanged: 0' in out
+    assert 'MP notify API' in out
+    assert 'created: 11; updated: 0; unchanged: 0' in out
 
 
 def test_provision_applies_and_prints_summary(tmpdir, capsys):
@@ -375,8 +379,11 @@ def test_provision_applies_and_prints_summary(tmpdir, capsys):
     assert code == 0
     assert zapi.template.create.called
     assert zapi.host.massadd.called
+    assert zapi.mediatype.create.called
+    assert zapi.user.addmedia.called
+    assert zapi.action.create.called
     out, _ = capsys.readouterr()
-    assert 'created: 8; updated: 0; unchanged: 0' in out
+    assert 'created: 11; updated: 0; unchanged: 0' in out
 
 
 def test_provision_exits_2_on_invalid_spec(tmpdir, capsys):

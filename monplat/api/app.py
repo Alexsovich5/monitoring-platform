@@ -1,8 +1,9 @@
-"""Flask application serving hosts, items and item history as JSON, plus
-the Graphite find and render endpoints from ``monplat.api.graphite``.
+"""Flask application serving hosts, items and item history as JSON, the
+Graphite find and render endpoints from ``monplat.api.graphite``, and the
+event log that the Zabbix alertscript posts to.
 
-Everything is read straight from the Zabbix PostgreSQL database; the
-``monplat`` database is only checked by the health endpoint here.
+Hosts, items and history are read straight from the Zabbix PostgreSQL
+database; events are stored in the ``monplat`` database.
 """
 import contextlib
 import json
@@ -11,7 +12,7 @@ import time
 import psycopg2
 from flask import Flask, Response, current_app, request
 
-from monplat import config, db, history
+from monplat import config, db, events, history
 from monplat.api import graphite
 from monplat.timeparse import TimeParseError, parse_time
 
@@ -188,6 +189,41 @@ def render():
     return json_response(series)
 
 
+def post_event():
+    data = request.get_json(silent=True)
+    if not isinstance(data, dict):
+        data = request.form
+    try:
+        event = events.parse_alert(data.get('subject') or '',
+                                   data.get('body') or '')
+    except events.EventError as exc:
+        raise BadRequest(str(exc))
+    with connection('monplat') as conn:
+        event_id = events.store(conn, event)
+    return json_response({'id': event_id, 'notified': False,
+                          'remediation': None}, 201)
+
+
+def list_events():
+    status = request.args.get('status') or None
+    if status is not None and status not in events.STATUSES:
+        raise BadRequest('status must be PROBLEM or OK, got %r' % status)
+    raw = request.args.get('limit')
+    limit = events.DEFAULT_LIMIT
+    if raw:
+        try:
+            limit = int(raw)
+        except ValueError:
+            limit = 0
+        if not 0 < limit <= events.MAX_LIMIT:
+            raise BadRequest('limit must be between 1 and %d, got %r'
+                             % (events.MAX_LIMIT, raw))
+    with connection('monplat') as conn:
+        rows = events.recent(conn, host=request.args.get('host') or None,
+                             status=status, limit=limit)
+    return json_response(rows)
+
+
 def _error(exc):
     return json_response({'error': str(exc)}, exc.status)
 
@@ -211,6 +247,9 @@ def create_app(cfg=None):
     app.add_url_rule('/api/v1/hosts/<host>/items', 'host_items', host_items)
     app.add_url_rule('/api/v1/items/<int:itemid>/history', 'item_history',
                      item_history)
+    app.add_url_rule('/api/v1/events', 'post_event', post_event,
+                     methods=['POST'])
+    app.add_url_rule('/api/v1/events', 'list_events', list_events)
     app.add_url_rule('/metrics/find/', 'metrics_find', metrics_find,
                      methods=['GET', 'POST'])
     app.add_url_rule('/render', 'render', render, methods=['GET', 'POST'])

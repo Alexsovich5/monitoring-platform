@@ -306,14 +306,14 @@ Conventions used in every task:
 - **Goal:** Alert intake (SPEC feature 7).
 - **Files:**
   - create `sql/monplat_schema.sql` (`events`, `remediations`)
-  - modify `docker/db/init/01-databases.sh` to apply the schema to `monplat`
+  - modify `docker/db/init/01-databases.sh` to apply the schema to `monplat` (as role `monplat`), and `docker-compose.yml` to mount `./sql` read-only at `/sql` in `db`
   - create `docker/zabbix/alertscripts/mp_alert.py` (stdlib `urllib`/`urllib2` only, runs on trusty's Python 2.7.6, and logs failures to stderr)
   - modify `docker/zabbix/Dockerfile` to copy the alertscript and make it executable
   - create `monplat/events.py`
   - modify `monplat/api/app.py` to add `POST/GET /api/v1/events`
   - create `config/actions.yml` (media type "MP API", Admin user media, action "MP notify API" with the message template from SPEC, condition Trigger value = PROBLEM (`conditiontype` 5, `operator` 0, `value` 1), `recovery_msg=1`)
-  - modify `monplat/templates.py` (or create `monplat/actions.py`) to provision the media type, media and action idempotently
-  - create `tests/unit/test_events.py`, `tests/unit/test_mp_alert.py` and `tests/integration/test_alert_chain.py`
+  - create `monplat/actions.py` to plan the media type, media and action idempotently (same `Change` objects, applied by `templates.apply`); `mpctl provision` runs it after the templates (`--actions FILE`, default `config/actions.yml`) and counts it in the summary line
+  - create `tests/unit/test_events.py`, `tests/unit/test_mp_alert.py`, `tests/unit/test_actions.py` and `tests/integration/test_alert_chain.py`; update the provision CLI tests in `tests/unit/test_templates.py` for the three extra objects
 - **Tests first:**
   - unit: `parse_alert` reads the key=value body, maps `{TRIGGER.NSEVERITY}` to an int, and rejects a missing `eventid` with 400
   - unit: a duplicate `(eventid, status)` is stored once

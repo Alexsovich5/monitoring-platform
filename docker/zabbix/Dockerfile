@@ -34,7 +34,9 @@ COPY zabbix.conf.php /etc/zabbix/web/zabbix.conf.php
 COPY apache-zabbix.conf /etc/apache2/conf-available/zabbix.conf
 COPY supervisord.conf /etc/supervisor/supervisord.conf
 COPY run-daemon.sh entrypoint.sh /usr/local/bin/
+COPY alertscripts/mp_alert.py /usr/lib/zabbix/alertscripts/mp_alert.py
 RUN chmod 0755 /usr/local/bin/run-daemon.sh /usr/local/bin/entrypoint.sh \
+               /usr/lib/zabbix/alertscripts/mp_alert.py \
  && chmod 0644 /etc/zabbix/web/zabbix.conf.php \
  && a2enconf zabbix \
  && mkdir -p /var/run/zabbix /var/log/zabbix /usr/lib/zabbix/alertscripts /usr/lib/zabbix/externalscripts \

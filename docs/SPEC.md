@@ -231,7 +231,7 @@ replacing `host.update templates=[...]`, so templates already linked to a host
 ### CLI: `mpctl`
 
 ```
-mpctl provision [--templates DIR] [--dry-run]     # prints created/updated/unchanged per object
+mpctl provision [--templates DIR] [--actions FILE] [--dry-run]  # prints created/updated/unchanged per object
 mpctl collect   [--once | --interval SECONDS] [--host NAME]
 mpctl forecast  [--once | --interval SECONDS]
 mpctl dashboards [--templates DIR] [--out grafana/dashboards]
