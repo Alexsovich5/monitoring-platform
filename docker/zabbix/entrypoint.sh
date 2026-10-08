@@ -26,6 +26,11 @@ if [ "$has_users" != 1 ]; then
     done
 fi
 
+# Recheck unsupported items every 30 s instead of the stock 600 s, so an
+# agent item such as vfs.file.size on a file that was missing comes back
+# soon after the file reappears.
+psql -q -v ON_ERROR_STOP=1 -c 'UPDATE config SET refresh_unsupported = 30' >/dev/null
+
 mkdir -p /var/run/zabbix /var/log/zabbix
 chown zabbix:zabbix /var/run/zabbix /var/log/zabbix
 mkdir -p /var/spool/mp-demo

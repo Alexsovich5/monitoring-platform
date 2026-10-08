@@ -1,0 +1,11 @@
+# Remediation rules applied by the API to PROBLEM events.  "mpctl
+# provision" creates each rule's Zabbix global script from "script" and
+# "command"; the API runs it on the event's host with script.execute.
+rules:
+  - name: clear-spool
+    trigger_match: "^Spool directory too large"
+    min_severity: warning
+    script: "MP clear spool"          # Zabbix global script, created by provision
+    command: "rm -f /var/spool/mp-demo/* && echo cleared"
+    expect_output: cleared            # a run only counts as ok with this output
+    cooldown_seconds: 600

@@ -1,21 +1,29 @@
 """Flask application serving hosts, items and item history as JSON, the
 Graphite find and render endpoints from ``monplat.api.graphite``, and the
 event log that the Zabbix alertscript posts to.  Each new event is pushed
-once through ``monplat.notify``.
+once through ``monplat.notify``, and a PROBLEM event that matches a rule in
+``config/remediation.yml`` runs that rule's Zabbix global script through
+``monplat.remediation``.
 
 Hosts, items and history are read straight from the Zabbix PostgreSQL
 database; events are stored in the ``monplat`` database.
 """
 import contextlib
+import datetime
 import json
+import logging
 import time
 
 import psycopg2
+import requests
 from flask import Flask, Response, current_app, request
+from pyzabbix import ZabbixAPIException
 
-from monplat import config, db, events, history, notify
+from monplat import config, db, events, history, notify, remediation
 from monplat.api import graphite
+from monplat.templates import SpecError
 from monplat.timeparse import TimeParseError, parse_time
+from monplat.zabbix import api as zabbix_api
 
 DEFAULT_FROM = '-1h'
 # Graphite's own default render range is the last 24 hours.
@@ -25,6 +33,9 @@ MONITORED = 0
 # hosts.flags: 0 = plain host, 4 = discovered host. Host prototypes (2)
 # are templates for discovery, not hosts, and are left out.
 HOST_FLAGS = (0, 4)
+
+
+log = logging.getLogger(__name__)
 
 
 class BadRequest(Exception):
@@ -206,8 +217,35 @@ def post_event():
             notified = notify.push(current_app.config['MONPLAT'], event)
             if not notified:
                 events.release_notification(conn, event_id)
+        outcome = _remediate(conn, event, event_id)
     return json_response({'id': event_id, 'notified': notified,
-                          'remediation': None}, 201)
+                          'remediation': outcome}, 201)
+
+
+def _remediate(conn, event, event_id):
+    """Run the remediation rule matching ``event``, if any.  Zabbix is only
+    contacted when a rule matches."""
+    try:
+        rules = remediation.load_rules(remediation.DEFAULT_PATH)
+    except SpecError as exc:
+        log.error('remediation rules not loaded: %s', exc)
+        return None
+    rule = remediation.match(rules, event)
+    if rule is None:
+        return None
+    try:
+        zapi = zabbix_api.connect(current_app.config['MONPLAT'], retries=1)
+    except (zabbix_api.ZabbixUnavailable, ZabbixAPIException,
+            requests.RequestException) as exc:
+        now = datetime.datetime.now(events.UTC)
+        if remediation.in_cooldown(conn, event.host, rule, now):
+            return remediation.result(rule, event.host, False, None,
+                                      'skipped: cooldown')
+        output = 'Zabbix API login failed: %s' % exc
+        remediation.record(conn, event_id, rule, event.host, False, output)
+        return remediation.result(rule, event.host, True, False, output)
+    return remediation.remediate(zapi, conn, event, rules,
+                                 event_id=event_id)
 
 
 def list_events():

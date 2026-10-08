@@ -31,6 +31,9 @@ def build_parser():
     provision.add_argument('--actions', metavar='FILE', default=None,
                            help='alert media type, user media and action '
                                 '(default: config/actions.yml)')
+    provision.add_argument('--remediation', metavar='FILE', default=None,
+                           help='remediation rules whose global scripts are '
+                                'created (default: config/remediation.yml)')
     provision.add_argument('--dry-run', action='store_true',
                            help='print the planned changes without '
                                 'applying them')
@@ -84,7 +87,7 @@ def cmd_provision(args):
     import requests
     from pyzabbix import ZabbixAPIException
 
-    from monplat import actions, config, templates
+    from monplat import actions, config, remediation, templates
     from monplat.zabbix import api
 
     try:
@@ -92,6 +95,8 @@ def cmd_provision(args):
         for spec in specs:
             templates.validate(spec)
         alerting = actions.load(args.actions or actions.DEFAULT_PATH)
+        rules = remediation.load_rules(args.remediation or
+                                       remediation.DEFAULT_PATH)
     except templates.SpecError as exc:
         sys.stderr.write('mpctl provision: %s\n' % exc)
         return 2
@@ -104,9 +109,10 @@ def cmd_provision(args):
     try:
         cfg = config.load()
         zapi = api.connect(cfg)
-        # Templates first, then the alert media type, media and action.
+        # Templates first, then the alert media type, media and action,
+        # then the remediation scripts.
         plans = ([(templates.plan, spec) for spec in specs] +
-                 [(actions.plan, alerting)])
+                 [(actions.plan, alerting), (actions.plan_scripts, rules)])
         for plan, spec in plans:
             changes = plan(zapi, spec)
             for change in changes:

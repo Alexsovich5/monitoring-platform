@@ -107,7 +107,7 @@ Components:
 | Service | Image | Role |
 |---|---|---|
 | `db` | `postgres:9.3` | Two databases: `zabbix` (Zabbix 2.4 schema) and `monplat` (events, remediations). |
-| `zabbix` | built from `docker/zabbix/Dockerfile` (`ubuntu:14.04`) | zabbix-server-pgsql, zabbix-frontend-php (Apache 2.4 + PHP 5.5) and zabbix-agent 2.4.3, run under supervisord. Zabbix 2.4 daemons have no foreground flag (`-f` arrived in 3.0) and always fork, so supervisord runs each of `zabbix_server` and `zabbix_agentd` through a small wrapper script (`docker/zabbix/run-daemon.sh <binary> <conf> <PidFile>`). The wrapper starts the daemon, traps TERM/INT to `kill $(cat <PidFile>)`, and loops `while kill -0 $(cat <PidFile>) 2>/dev/null; do sleep 5; done; exit 1`, so supervisord keeps a foreground process per daemon, forwards stop signals and restarts a daemon that dies. supervisord runs Apache as `apache2 -DFOREGROUND` after sourcing `/etc/apache2/envvars`. The debs' `dbconfig-common` prompts are preseeded off (`dbconfig-install boolean false`) with `DEBIAN_FRONTEND=noninteractive`. The entrypoint waits for `db`, loads the plain `/usr/share/zabbix-server-pgsql/{schema,images,data}.sql` on first start, and creates `/var/spool/mp-demo` owned by `zabbix` with mode 1777. `zabbix_server.conf` sets `CacheUpdateFrequency=5` so newly provisioned items accept trapper values within seconds (default 60 s). |
+| `zabbix` | built from `docker/zabbix/Dockerfile` (`ubuntu:14.04`) | zabbix-server-pgsql, zabbix-frontend-php (Apache 2.4 + PHP 5.5) and zabbix-agent 2.4.3, run under supervisord. Zabbix 2.4 daemons have no foreground flag (`-f` arrived in 3.0) and always fork, so supervisord runs each of `zabbix_server` and `zabbix_agentd` through a small wrapper script (`docker/zabbix/run-daemon.sh <binary> <conf> <PidFile>`). The wrapper starts the daemon, traps TERM/INT to `kill $(cat <PidFile>)`, and loops `while kill -0 $(cat <PidFile>) 2>/dev/null; do sleep 5; done; exit 1`, so supervisord keeps a foreground process per daemon, forwards stop signals and restarts a daemon that dies. supervisord runs Apache as `apache2 -DFOREGROUND` after sourcing `/etc/apache2/envvars`. The debs' `dbconfig-common` prompts are preseeded off (`dbconfig-install boolean false`) with `DEBIAN_FRONTEND=noninteractive`. The entrypoint waits for `db`, loads the plain `/usr/share/zabbix-server-pgsql/{schema,images,data}.sql` on first start, and creates `/var/spool/mp-demo` owned by `zabbix` with mode 1777. On every start it also sets `config.refresh_unsupported` to 30 s (stock: 600 s), so an agent item that went unsupported, such as `vfs.file.size` on a missing file, is rechecked within a minute. `zabbix_server.conf` sets `CacheUpdateFrequency=5` so newly provisioned items accept trapper values within seconds (default 60 s). |
 | `snmpsim` | `monplat` app image | `snmpsimd.py --data-dir=/data --agent-udpv4-endpoint=0.0.0.0:1161 --process-user=nobody --process-group=nogroup` serving `docker/snmpsim/data/public.snmprec`. snmpsim 0.2.4 refuses to run as root without `--process-user/--process-group`, and it binds the endpoint after dropping privileges, so it listens on unprivileged UDP 1161. `/data` must be readable by `nobody`. |
 | `api` | `monplat` app image (`python:2.7.13`) | `gunicorn monplat.api.app:create_app()` on :5000. The app image's entrypoint runs `python setup.py -q develop --no-deps` against the bind-mounted `/app` before `exec "$@"`, so the `mpctl` console script finds its egg-info. |
 | `collector` | `monplat` app image | `mpctl collect --interval 30`. |
@@ -255,7 +255,7 @@ spec or arguments are invalid.
 | `monplat.api.graphite` | `metric_path(host, key) -> str`, `find(conn, query) -> [node]`, `parse_time(s, now) -> int`, `render(conn, targets, frm, until, max_points)` |
 | `monplat.events` | `parse_alert(subject, body) -> Event`, `store(conn, event) -> id` |
 | `monplat.notify` | `priority(severity) -> int`, `push(cfg, event) -> bool` |
-| `monplat.remediation` | `load_rules(path)`, `match(rules, event) -> Rule or None`, `in_cooldown(conn, host, rule, now) -> bool`, `remediate(zapi, conn, event, rules)` |
+| `monplat.remediation` | `load_rules(path)`, `match(rules, event) -> Rule or None`, `in_cooldown(conn, host, rule, now) -> bool`, `remediate(zapi, conn, event, rules, event_id, now=None) -> dict or None` (`event_id` is the `events` row the `remediations` row refers to) |
 | `monplat.forecast` | `fit(points) -> (slope, intercept)`, `hours_to_threshold(points, threshold, now) -> float or None`, `run(cfg, once, interval)` |
 | `monplat.dashboards` | `build(spec) -> dict` (Grafana 1.x dashboard, `version: 6`, the schema version of Grafana 1.9's dashboardSrv), `write(specs, outdir)` |
 
@@ -315,7 +315,8 @@ rules:
     trigger_match: "^Spool directory too large"
     min_severity: warning
     script: "MP clear spool"          # Zabbix global script, created by provision
-    command: "rm -f /var/spool/mp-demo/*"
+    command: "rm -f /var/spool/mp-demo/* && echo cleared"
+    expect_output: cleared            # a run only counts as ok with this output
     cooldown_seconds: 600
 ```
 

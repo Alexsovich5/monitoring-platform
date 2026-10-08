@@ -116,7 +116,8 @@ def test_write_creates_one_file_per_spec(tmpdir):
     assert data['title'] == 'Template MP Linux'
 
 
-@pytest.mark.parametrize('name', ['mp-linux.json', 'mp-snmp.json'])
+@pytest.mark.parametrize('name', ['mp-linux.json', 'mp-snmp.json',
+                                  'mp-spool.json'])
 def test_committed_dashboards_match_regeneration(tmpdir, name):
     specs = templates.load_specs(os.path.join(ROOT, 'config', 'templates'))
     dashboards.write(specs, str(tmpdir))
@@ -131,7 +132,8 @@ def test_cli_dashboards_writes_files(tmpdir, capsys):
                      '--out', str(tmpdir)])
     assert code == 0
     assert sorted(os.listdir(str(tmpdir))) == ['mp-linux.json',
-                                               'mp-snmp.json']
+                                               'mp-snmp.json',
+                                               'mp-spool.json']
     out, _ = capsys.readouterr()
     assert 'mp-linux.json' in out
 

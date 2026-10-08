@@ -1,0 +1,13 @@
+# Size of a file in the demo spool directory, polled from the agent in the
+# zabbix container.  Zabbix 2.4 has no vfs.dir.size, so one file is
+# watched.  The remediation rule "clear-spool" empties the directory when
+# the trigger fires.
+template: Template MP Spool
+group: MP Templates
+applications: [Spool]
+items:
+  - {key: "vfs.file.size[/var/spool/mp-demo/blob]", name: "Demo spool blob size", type: agent, value_type: unsigned, units: B, application: Spool, delay: 30}
+triggers:
+  - {name: "Spool directory too large on {HOST.NAME}", expression: "{Template MP Spool:vfs.file.size[/var/spool/mp-demo/blob].last()}>5242880", severity: warning}
+hosts:
+  - {host: Zabbix server, groups: [Zabbix servers], interfaces: []}

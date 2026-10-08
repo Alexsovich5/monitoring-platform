@@ -1,0 +1,118 @@
+{
+  "annotations": {
+    "enable": false,
+    "list": []
+  },
+  "editable": true,
+  "hideAllLegends": false,
+  "nav": [
+    {
+      "collapse": false,
+      "enable": true,
+      "notice": false,
+      "refresh_intervals": [
+        "30s",
+        "1m",
+        "5m",
+        "15m",
+        "1h"
+      ],
+      "status": "Stable",
+      "time_options": [
+        "5m",
+        "15m",
+        "1h",
+        "6h",
+        "12h",
+        "24h",
+        "2d",
+        "7d",
+        "30d"
+      ],
+      "type": "timepicker"
+    }
+  ],
+  "refresh": "1m",
+  "rows": [
+    {
+      "collapse": false,
+      "editable": true,
+      "height": "250px",
+      "panels": [
+        {
+          "aliasColors": {},
+          "bars": false,
+          "datasource": null,
+          "editable": true,
+          "fill": 1,
+          "grid": {
+            "leftMax": null,
+            "leftMin": null,
+            "rightMax": null,
+            "rightMin": null,
+            "threshold1": null,
+            "threshold1Color": "rgba(216, 200, 27, 0.27)",
+            "threshold2": null,
+            "threshold2Color": "rgba(234, 112, 112, 0.22)"
+          },
+          "id": 1,
+          "legend": {
+            "avg": false,
+            "current": true,
+            "max": false,
+            "min": false,
+            "show": true,
+            "total": false,
+            "values": false
+          },
+          "lines": true,
+          "linewidth": 1,
+          "links": [],
+          "nullPointMode": "connected",
+          "percentage": false,
+          "pointradius": 5,
+          "points": false,
+          "renderer": "flot",
+          "seriesOverrides": [],
+          "span": 12,
+          "stack": false,
+          "steppedLine": false,
+          "targets": [
+            {
+              "target": "zabbix.Zabbix_server.vfs_file_size_var_spool_mp-demo_blob_"
+            }
+          ],
+          "title": "Demo spool blob size",
+          "tooltip": {
+            "shared": false,
+            "value_type": "individual"
+          },
+          "type": "graph",
+          "x-axis": true,
+          "y-axis": true,
+          "y_formats": [
+            "bytes",
+            "short"
+          ]
+        }
+      ],
+      "title": "Spool"
+    }
+  ],
+  "sharedCrosshair": false,
+  "style": "dark",
+  "tags": [
+    "monplat"
+  ],
+  "templating": {
+    "enable": false,
+    "list": []
+  },
+  "time": {
+    "from": "now-1h",
+    "to": "now"
+  },
+  "timezone": "browser",
+  "title": "Template MP Spool",
+  "version": 6
+}

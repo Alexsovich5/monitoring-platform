@@ -6,6 +6,8 @@ services:
     image: monitoring-platform:app
     volumes:
       - .:/app
+      # Lets the integration tests write the file that remediation removes.
+      - mp-demo-spool:/var/spool/mp-demo
     working_dir: /app
     depends_on:
       - db
@@ -81,12 +83,15 @@ services:
     platform: linux/amd64
     depends_on:
       - db
+    volumes:
+      - mp-demo-spool:/var/spool/mp-demo
     ports:
       - "20780:80"
       - "20751:10051"
 
 volumes:
   dbdata:
+  mp-demo-spool:
 
 networks:
   default:

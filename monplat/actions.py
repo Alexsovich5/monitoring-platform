@@ -1,10 +1,12 @@
 """Provision the Zabbix media type, user media and action that send alerts
-to the API (``config/actions.yml``).
+to the API (``config/actions.yml``), and the global scripts that the
+remediation rules run (``config/remediation.yml``).
 
 ``plan()`` returns ``templates.Change`` objects in the same form as the
 template plan, and only calls ``*.get``; ``templates.apply()`` performs
 them.  Objects are matched by name (media type description, user alias,
-action name), so a second run reports everything unchanged.
+action name, script name), so a second run reports everything
+unchanged.
 """
 import os
 
@@ -17,6 +19,8 @@ DEFAULT_PATH = os.path.join('config', 'actions.yml')
 EVENTSOURCE_TRIGGERS = 0
 OPERATION_SEND_MESSAGE = 0
 STATUS_ENABLED = 0
+SCRIPT_TYPE_CUSTOM = 0
+EXECUTE_ON_AGENT = 0
 
 _SECTIONS = {
     'media_type': ('description', 'type', 'exec_path'),
@@ -174,3 +178,34 @@ def plan(zapi, spec):
     media_type = _plan_media_type(zapi, spec)
     userid, media = _plan_user_media(zapi, spec, media_type.id)
     return [media_type, media, _plan_action(zapi, spec, userid)]
+
+
+def plan_scripts(zapi, rules):
+    """Return one change per global script named by the remediation
+    ``rules``: a custom script run on the agent with the rule's command."""
+    changes = []
+    seen = set()
+    for rule in rules:
+        name = rule.script
+        if name in seen:
+            continue
+        seen.add(name)
+        desired = {'command': rule.command, 'type': SCRIPT_TYPE_CUSTOM,
+                   'execute_on': EXECUTE_ON_AGENT}
+        found = zapi.script.get(filter={'name': name}, output='extend')
+        if not found:
+            params = dict(desired, name=name)
+            changes.append(Change('create', 'script', name, 'script.create',
+                                  params, None))
+            continue
+        current = found[0]
+        diff = dict((k, v) for k, v in desired.items()
+                    if str(current.get(k, '')) != str(v))
+        if diff:
+            diff['scriptid'] = current['scriptid']
+            changes.append(Change('update', 'script', name, 'script.update',
+                                  diff, current['scriptid']))
+        else:
+            changes.append(Change('unchanged', 'script', name, None, None,
+                                  current['scriptid']))
+    return changes
