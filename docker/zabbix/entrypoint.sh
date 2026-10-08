@@ -33,6 +33,16 @@ psql -q -v ON_ERROR_STOP=1 -c 'UPDATE config SET refresh_unsupported = 30' >/dev
 
 mkdir -p /var/run/zabbix /var/log/zabbix
 chown zabbix:zabbix /var/run/zabbix /var/log/zabbix
+# The monplat-secrets volume holds the alert intake token that "mpctl
+# provision" writes; the alertscript runs as zabbix and needs to read it.
+mkdir -p /var/lib/monplat/secrets
+chgrp zabbix /var/lib/monplat/secrets
+chmod 2750 /var/lib/monplat/secrets
+if [ -f /var/lib/monplat/secrets/intake.token ]; then
+    chgrp zabbix /var/lib/monplat/secrets/intake.token
+    chmod 0640 /var/lib/monplat/secrets/intake.token
+fi
+
 mkdir -p /var/spool/mp-demo
 chown zabbix:zabbix /var/spool/mp-demo
 chmod 1777 /var/spool/mp-demo

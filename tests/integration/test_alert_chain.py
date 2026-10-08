@@ -8,7 +8,7 @@ import requests
 
 from monplat import db, events
 
-from .conftest import send_until_processed, wait_for
+from .conftest import intake_headers, send_until_processed, wait_for
 
 pytestmark = pytest.mark.integration
 
@@ -53,17 +53,63 @@ def test_provisioned_action_and_media(zapi):
     conditions = [(c['conditiontype'], c['operator'], c['value'])
                   for c in action['filter']['conditions']]
     assert conditions == [('5', '0', '1')]
+    # value= is the last line, so an item value cannot add fields.
+    lines = action['def_longdata'].replace('\r\n', '\n').strip().split('\n')
+    assert lines[-1] == 'value={ITEM.VALUE}'
+    assert 'host={HOST.HOST}' in lines
     mediatypes = zapi.mediatype.get(filter={'description': 'MP API'},
                                     output='extend')
     assert [(m['type'], m['exec_path']) for m in mediatypes] == \
         [('1', 'mp_alert.py')]
 
 
+INTAKE_BODY = '\n'.join([
+    'eventid=%d', 'status=PROBLEM', 'host=mp-intake-check', 'trigger_id=1',
+    'trigger_name=intake check', 'severity=2', 'time=2014.12.18 12:00:00',
+    'value=7\nstatus=OK\neventid=1'])
+
+
+def _intake_rows(cfg, eventid):
+    conn = db.connect(cfg, 'monplat')
+    try:
+        cursor = conn.cursor()
+        cursor.execute('SELECT status, item_value FROM events '
+                       'WHERE eventid = %s', (eventid,))
+        rows = cursor.fetchall()
+        cursor.close()
+    finally:
+        conn.close()
+    return rows
+
+
+@pytest.mark.parametrize('headers', [{}, {'X-Monplat-Token': 'wrong'}])
+def test_event_intake_without_the_token_is_refused(cfg, headers):
+    eventid = 990101 + len(headers)
+    response = requests.post(cfg['api']['url'] + '/api/v1/events',
+                             data={'subject': 'PROBLEM: intake check',
+                                   'body': INTAKE_BODY % eventid},
+                             headers=headers, timeout=10)
+    assert response.status_code == 401
+    assert _intake_rows(cfg, eventid) == []
+
+
+def test_event_intake_with_the_token_keeps_injected_lines_in_the_value(
+        cfg):
+    eventid = 990110
+    response = requests.post(cfg['api']['url'] + '/api/v1/events',
+                             data={'subject': 'PROBLEM: intake check',
+                                   'body': INTAKE_BODY % eventid},
+                             headers=intake_headers(cfg), timeout=10)
+    assert response.status_code == 201
+    assert _intake_rows(cfg, eventid) == [
+        ('PROBLEM', '7\nstatus=OK\neventid=1')]
+
+
 def test_store_keeps_one_row_per_eventid_and_status(cfg):
     body = '\n'.join(['eventid=990001', 'status=PROBLEM',
                       'host=mp-store-check', 'trigger_id=1',
                       'trigger_name=store check', 'severity=2',
-                      'value=1', 'time=2014.12.18 12:00:00'])
+                      'time=2014.12.18 12:00:00', 'value=1'])
     event = events.parse_alert('PROBLEM: store check', body)
     conn = db.connect(cfg, 'monplat')
     try:

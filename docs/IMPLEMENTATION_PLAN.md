@@ -435,3 +435,90 @@ Conventions used in every task:
   Describes what the stack does, which integrations are simulated, how to
   run and test it, and lists the repository layout from git ls-files.
   ```
+
+## T17 — Security and hygiene hardening
+
+A review of the whole repository after T16. Found and changed:
+
+- **Unbounded trapper reply read** (`monplat/zabbix/sender.py`): `_recv_frame`
+  trusted the 64-bit ZBXD length, read until that many bytes or EOF, had only a
+  per-`recv` timeout (a trickling peer never timed out) and grew a string with
+  `+=`. Now a declared length above `MAX_RESPONSE` (64 KiB) is refused before
+  the body is read, `send()`'s `timeout` is one deadline for connect, send and
+  every read, and bytes are collected in a `bytearray`. Tests: fake TCP peers
+  for an oversized and a huge declared length, an endless stream (read stops at
+  the cap) and a 1-byte trickle (fails at the deadline); a reply split over
+  many writes still parses.
+- **Unauthenticated event intake** (`monplat/api/app.py`): anyone reaching the
+  API could post PROBLEM events or forged OK recoveries, and (with the next
+  item) trigger remote scripts. New `monplat/intake.py`: `mpctl provision`
+  creates a random 256-bit token (mode 0640, group of its directory) in the
+  `monplat-secrets` named volume, never in the repository; `mp_alert.py` sends
+  it as `X-Monplat-Token`; the API compares it with `hmac.compare_digest` and
+  answers 401 (wrong/missing) or 503 (no token file) before reading the body.
+  Requests above 64 KiB get 413. The zabbix entrypoint gives the secrets
+  directory to the `zabbix` group (mode 2750) so the alertscript can read it;
+  the volume is read-only in `api` and absent from the other services. The
+  read-only endpoints stay open for Grafana. Published ports now bind to
+  127.0.0.1.
+- **key=value field injection** (`monplat/events.py`): `{ITEM.VALUE}` and
+  trigger names come from monitored hosts, so a value with `"\nstatus=OK"`
+  could override fields. `value=` is now the last line of the provisioned
+  template and everything after it is the value; other lines must be known
+  keys, given once; `eventid`/`trigger_id` digits only, `status`, `severity`,
+  `time` validated, `host` restricted to the Zabbix host-name character set
+  (the template now sends `{HOST.HOST}` instead of `{HOST.NAME}`); bodies above
+  8192 characters are refused; `item_value`/`trigger_name` are cut to their
+  column size instead of failing the insert.
+- **Forged events ran remote scripts** (`monplat/remediation.py`): the target
+  host was looked up by the name in the message. Now the event is re-read with
+  `event.get` and `trigger.get`; the script runs only for an existing,
+  unacknowledged trigger PROBLEM that is still current, whose trigger id and
+  single host match the message and whose Zabbix trigger name and priority
+  match the rule, on the hostid reported by Zabbix. Rules are opt-in
+  (`enabled`, false in `config/remediation.yml`) and must name `allow_hosts`
+  and/or `allow_groups`; the script name must resolve to exactly one global
+  script, created with `host_access` 3. Every refusal (including rate limiting
+  and Zabbix being unreachable) is recorded in `remediations` with the new
+  `ran = false` column, and only real runs start a cooldown. `make
+  integration` enables the rule through `MONPLAT_REMEDIATION_RULES_FILE`
+  (`tests/integration/remediation.yml`, passed through by compose to `api` and
+  `app`); `remediation.rules_file` in `config/monplat.yml` names the default.
+- **Password and session token in debug logs**: pyzabbix logs every request at
+  DEBUG, including the `user.login` password and the `auth` token.
+  `monplat/zabbix/api.py` keeps the `pyzabbix` logger at INFO. A sentinel test
+  (`tests/unit/test_secret_leaks.py`) forces login, provision, forecast, DB and
+  push failures and checks that the Zabbix password, DB password and push token
+  appear in no exception, CLI output, log record or HTTP response.
+- **Unverified package downloads**: the Zabbix `.deb`s were fetched over plain
+  HTTP with no checksum and installed with `dpkg -i`; the Grafana and npm
+  tarballs were fetched over HTTPS without a checksum. `make zabbix-vendor` now
+  downloads the debs on the host over HTTPS (like `make grafana-vendor`), and
+  both images check `vendor/` against committed `SHA256SUMS` before using it.
+  `tests/unit/test_deploy.py` fails if a Dockerfile or apt config uses an
+  apt signature bypass or `http://`, if the Makefile downloads over HTTP, if a
+  vendored file is not covered by the sums, or if a published port is not on
+  127.0.0.1.
+- **Alertscript reply read** (`mp_alert.py`): reads at most 64 KiB of the
+  reply or error body and reports `IOError`s instead of crashing.
+
+Deviations: T4's Dockerfile no longer fetches the debs with `wget`; they come
+from `docker/zabbix/vendor/` (gitignored, filled by `make zabbix-vendor`,
+which `make build` depends on). The alert message template field order and
+`{HOST.HOST}` differ from the T12 text; SPEC is updated to match.
+
+Not changed (lab trade-offs, listed in the README): supervisord's XML-RPC
+port on the compose network has no password; the Zabbix agent accepts remote
+commands from `zabbix` and the `app` test runner; `/render` does not limit
+the number of targets or the time range; the Zabbix API client reads replies
+through `requests` without a size cap; default lab credentials stay in
+`config/monplat.yml` and the compose file.
+
+- **Tests first:** the tests named above were seen failing before each
+  change; the leak tests for paths that already kept secrets out stay as
+  regression guards.
+- **Acceptance:** `make build && make test`
+- **Commit:**
+  ```
+  Authenticate event intake and confirm remediation with Zabbix
+  ```

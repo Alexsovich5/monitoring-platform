@@ -21,6 +21,7 @@ CREATE TABLE remediations (
   script_name  varchar(128) NOT NULL,
   ok           boolean NOT NULL,
   output       text,
+  ran          boolean NOT NULL DEFAULT true,
   executed_at  timestamp with time zone NOT NULL DEFAULT now()
 );
 CREATE INDEX remediations_host_rule_idx ON remediations (host, rule, executed_at);

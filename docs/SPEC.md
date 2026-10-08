@@ -51,10 +51,14 @@ Grafana 1.9.1 front end.
    API with severity-to-priority mapping. Only a local stub is used (see
    "Simulated/mocked integrations").
 9. **Auto-remediation.** Rules in `config/remediation.yml` map trigger name
-   patterns and severity to Zabbix global scripts. On a matching PROBLEM event,
-   the API runs the script on the affected host through Zabbix's
-   `script.execute` (remote commands on the agent), with a per-host/per-rule
-   cooldown, and logs the outcome.
+   patterns and severity to Zabbix global scripts. Rules are opt-in
+   (`enabled: false` in the shipped file) and name the hosts or host groups
+   they may act on. On a matching PROBLEM event, the API re-reads the event
+   and its trigger from the Zabbix API, and only when Zabbix confirms an
+   unacknowledged, current PROBLEM on an allowed host does it run the script
+   on that host (by the hostid Zabbix reports) through `script.execute`
+   (remote commands on the agent), with a per-host/per-rule cooldown. Every
+   run and every refusal is logged.
 10. **Predictive alerting.** `mpctl forecast` fits a least-squares line to recent
     history of configured items (e.g. `mp.fs.pused[/]`) and pushes
     "hours until threshold" to a trapper item. A provisioned trigger fires when
@@ -107,7 +111,7 @@ Components:
 | Service | Image | Role |
 |---|---|---|
 | `db` | `postgres:9.3` | Two databases: `zabbix` (Zabbix 2.4 schema) and `monplat` (events, remediations). |
-| `zabbix` | built from `docker/zabbix/Dockerfile` (`ubuntu:14.04`) | zabbix-server-pgsql, zabbix-frontend-php (Apache 2.4 + PHP 5.5) and zabbix-agent 2.4.3, run under supervisord. Zabbix 2.4 daemons have no foreground flag (`-f` arrived in 3.0) and always fork, so supervisord runs each of `zabbix_server` and `zabbix_agentd` through a small wrapper script (`docker/zabbix/run-daemon.sh <binary> <conf> <PidFile>`). The wrapper starts the daemon, traps TERM/INT to `kill $(cat <PidFile>)`, and loops `while kill -0 $(cat <PidFile>) 2>/dev/null; do sleep 5; done; exit 1`, so supervisord keeps a foreground process per daemon, forwards stop signals and restarts a daemon that dies. supervisord runs Apache as `apache2 -DFOREGROUND` after sourcing `/etc/apache2/envvars`. The debs' `dbconfig-common` prompts are preseeded off (`dbconfig-install boolean false`) with `DEBIAN_FRONTEND=noninteractive`. The entrypoint waits for `db`, loads the plain `/usr/share/zabbix-server-pgsql/{schema,images,data}.sql` on first start, and creates `/var/spool/mp-demo` owned by `zabbix` with mode 1777. On every start it also sets `config.refresh_unsupported` to 30 s (stock: 600 s), so an agent item that went unsupported, such as `vfs.file.size` on a missing file, is rechecked within a minute. `zabbix_server.conf` sets `CacheUpdateFrequency=5` so newly provisioned items accept trapper values within seconds (default 60 s). |
+| `zabbix` | built from `docker/zabbix/Dockerfile` (`ubuntu:14.04`) | zabbix-server-pgsql, zabbix-frontend-php (Apache 2.4 + PHP 5.5) and zabbix-agent 2.4.3, run under supervisord. The 2.4.3 `.deb`s are downloaded on the host over HTTPS by `make zabbix-vendor` and checked against `docker/zabbix/SHA256SUMS` in the build before `dpkg -i`. Zabbix 2.4 daemons have no foreground flag (`-f` arrived in 3.0) and always fork, so supervisord runs each of `zabbix_server` and `zabbix_agentd` through a small wrapper script (`docker/zabbix/run-daemon.sh <binary> <conf> <PidFile>`). The wrapper starts the daemon, traps TERM/INT to `kill $(cat <PidFile>)`, and loops `while kill -0 $(cat <PidFile>) 2>/dev/null; do sleep 5; done; exit 1`, so supervisord keeps a foreground process per daemon, forwards stop signals and restarts a daemon that dies. supervisord runs Apache as `apache2 -DFOREGROUND` after sourcing `/etc/apache2/envvars`. The debs' `dbconfig-common` prompts are preseeded off (`dbconfig-install boolean false`) with `DEBIAN_FRONTEND=noninteractive`. The entrypoint waits for `db`, loads the plain `/usr/share/zabbix-server-pgsql/{schema,images,data}.sql` on first start, and creates `/var/spool/mp-demo` owned by `zabbix` with mode 1777. On every start it also sets `config.refresh_unsupported` to 30 s (stock: 600 s), so an agent item that went unsupported, such as `vfs.file.size` on a missing file, is rechecked within a minute. `zabbix_server.conf` sets `CacheUpdateFrequency=5` so newly provisioned items accept trapper values within seconds (default 60 s). |
 | `snmpsim` | `monplat` app image | `snmpsimd.py --data-dir=/data --agent-udpv4-endpoint=0.0.0.0:1161 --process-user=nobody --process-group=nogroup` serving `docker/snmpsim/data/public.snmprec`. snmpsim 0.2.4 refuses to run as root without `--process-user/--process-group`, and it binds the endpoint after dropping privileges, so it listens on unprivileged UDP 1161. `/data` must be readable by `nobody`. |
 | `api` | `monplat` app image (`python:2.7.13`) | `gunicorn monplat.api.app:create_app()` on :5000. The app image's entrypoint runs `python setup.py -q develop --no-deps` against the bind-mounted `/app` before `exec "$@"`, so the `mpctl` console script finds its egg-info. |
 | `collector` | `monplat` app image | `mpctl collect --interval 30`. |
@@ -156,6 +160,8 @@ CREATE TABLE events (
   notified      boolean NOT NULL DEFAULT false,
   UNIQUE (eventid, status)
 );
+-- ran = false for refusals (unconfirmed event, host not allowed,
+-- rate limit, Zabbix unreachable); only ran rows start a cooldown.
 CREATE TABLE remediations (
   id           serial PRIMARY KEY,
   event_id     integer NOT NULL REFERENCES events(id),
@@ -164,6 +170,7 @@ CREATE TABLE remediations (
   script_name  varchar(128) NOT NULL,
   ok           boolean NOT NULL,
   output       text,
+  ran          boolean NOT NULL DEFAULT true,
   executed_at  timestamp with time zone NOT NULL DEFAULT now()
 );
 CREATE INDEX remediations_host_rule_idx ON remediations (host, rule, executed_at);
@@ -183,10 +190,15 @@ database:
   monplat_dsn: "host=db dbname=monplat user=monplat password=monplat"
 api:
   url: http://api:5000
+  # Shared secret for POST /api/v1/events, created by "mpctl provision" in
+  # the monplat-secrets volume (never committed).
+  intake_token_file: /var/lib/monplat/secrets/intake.token
 notify:
   pushover_url: http://pushover-stub:8025/1/messages.json
   token: stub-app-token
   user: stub-user-key
+remediation:
+  rules_file: config/remediation.yml
 forecast:
   window_hours: 6
   horizon_hours: 24
@@ -231,7 +243,7 @@ replacing `host.update templates=[...]`, so templates already linked to a host
 ### CLI: `mpctl`
 
 ```
-mpctl provision [--templates DIR] [--actions FILE] [--dry-run]  # prints created/updated/unchanged per object
+mpctl provision [--templates DIR] [--actions FILE] [--remediation FILE] [--dry-run]  # prints created/updated/unchanged per object; also creates the intake token file
 mpctl collect   [--once | --interval SECONDS] [--host NAME]
 mpctl forecast  [--once | --interval SECONDS]
 mpctl dashboards [--templates DIR] [--out grafana/dashboards]
@@ -255,7 +267,8 @@ spec or arguments are invalid.
 | `monplat.api.graphite` | `metric_path(host, key) -> str`, `find(conn, query) -> [node]`, `parse_time(s, now) -> int`, `render(conn, targets, frm, until, max_points)` |
 | `monplat.events` | `parse_alert(subject, body) -> Event`, `store(conn, event) -> id` |
 | `monplat.notify` | `priority(severity) -> int`, `push(cfg, event) -> bool` |
-| `monplat.remediation` | `load_rules(path)`, `match(rules, event) -> Rule or None`, `in_cooldown(conn, host, rule, now) -> bool`, `remediate(zapi, conn, event, rules, event_id, now=None) -> dict or None` (`event_id` is the `events` row the `remediations` row refers to) |
+| `monplat.intake` | `token_path(cfg)`, `ensure_token(path) -> (token, created)`, `read_token(path)`, `matches(expected, given) -> bool` (constant time) |
+| `monplat.remediation` | `rules_path(cfg)`, `load_rules(path)`, `match(rules, event) -> Rule or None` (enabled rules only), `in_cooldown(conn, host, rule, now) -> bool`, `remediate(zapi, conn, event, rules, event_id, now=None) -> dict or None` (`event_id` is the `events` row the `remediations` row refers to) |
 | `monplat.forecast` | `fit(points) -> (slope, intercept)`, `hours_to_threshold(points, threshold, now) -> float or None`, `run(cfg, once, interval)` |
 | `monplat.dashboards` | `build(spec) -> dict` (Grafana 1.x dashboard, `version: 6`, the schema version of Grafana 1.9's dashboardSrv), `write(specs, outdir)` |
 
@@ -267,7 +280,7 @@ spec or arguments are invalid.
 | `GET /api/v1/hosts` | `[{"hostid", "host"}]` of monitored hosts (status 0, host prototypes excluded) |
 | `GET /api/v1/hosts/<host>/items` | `[{"itemid", "key", "name", "units", "value_type"}]` |
 | `GET /api/v1/items/<itemid>/history?from=&until=&step=` | `[{"clock", "value"}]`. `from` and `until` take the forms `now`, epoch seconds, or `-<n><unit>`. `step` is in seconds. |
-| `POST /api/v1/events` | form or JSON `{subject, body}` from the alertscript → 201 `{"id": n, "notified": bool, "remediation": {...} or null}` |
+| `POST /api/v1/events` | form or JSON `{subject, body}` from the alertscript, with the intake token in `X-Monplat-Token` → 201 `{"id": n, "notified": bool, "remediation": {...} or null}`; 401 without the right token, 503 when no token file exists, 400 for a malformed body, 413 above 64 KiB. This is the only state-changing endpoint; the read-only endpoints need no token. |
 | `GET /api/v1/events?host=&status=&limit=` | Newest first |
 | `GET /metrics/find/?query=zabbix.*` | Graphite find: `[{"text", "id", "leaf", "expandable", "allowChildren"}]` |
 | `GET/POST /render` | Graphite render, `format=json` only: `[{"target", "datapoints": [[value, ts], ...]}]`. Supports `target` (repeated), `from`, `until`, `maxDataPoints`, `*` wildcards and `alias(path, "name")`. |
@@ -290,8 +303,17 @@ one host sanitise to the same name, `_<itemid>` is appended to each.
 ### Alertscript contract
 
 The Zabbix media type "MP API" (type 1 = script) calls
-`mp_alert.py {ALERT.SENDTO} {ALERT.SUBJECT} {ALERT.MESSAGE}`. The action message
-template that `mpctl provision` creates is below. The action "MP notify API"
+`mp_alert.py {ALERT.SENDTO} {ALERT.SUBJECT} {ALERT.MESSAGE}`. The script reads
+the intake token from `/var/lib/monplat/secrets/intake.token` (the
+`monplat-secrets` volume; `mpctl provision` creates the token on first run, the
+zabbix entrypoint gives the directory to the `zabbix` group) and sends it as
+`X-Monplat-Token`. The action message template that `mpctl provision` creates
+is below. `value=` is the last line: the API takes everything after it as the
+value, so an item value containing `"\nstatus=OK"` cannot add or override
+fields. Every other line must be one of these keys, given once; `eventid` and
+`trigger_id` must be digits, `status` PROBLEM or OK, `severity` 0-5, `time` in
+the format shown, and `host` (`{HOST.HOST}`, the technical name) only letters,
+digits, space, `.`, `-` and `_`. Bodies above 8192 characters are refused. The action "MP notify API"
 has the condition Trigger value = PROBLEM (`conditiontype` 5, `operator` 0,
 `value` 1) and `recovery_msg=1`, so each problem yields one PROBLEM message and
 one recovery (OK) message, with no duplicate OK rows.
@@ -299,12 +321,12 @@ one recovery (OK) message, with no duplicate OK rows.
 ```
 eventid={EVENT.ID}
 status={TRIGGER.STATUS}
-host={HOST.NAME}
+host={HOST.HOST}
 trigger_id={TRIGGER.ID}
 trigger_name={TRIGGER.NAME}
 severity={TRIGGER.NSEVERITY}
-value={ITEM.VALUE}
 time={EVENT.DATE} {EVENT.TIME}
+value={ITEM.VALUE}
 ```
 
 ### Remediation rules: `config/remediation.yml`
@@ -312,13 +334,29 @@ time={EVENT.DATE} {EVENT.TIME}
 ```yaml
 rules:
   - name: clear-spool
+    enabled: false                    # opt in per rule
     trigger_match: "^Spool directory too large"
     min_severity: warning
     script: "MP clear spool"          # Zabbix global script, created by provision
     command: "rm -f /var/spool/mp-demo/* && echo cleared"
     expect_output: cleared            # a run only counts as ok with this output
     cooldown_seconds: 600
+    allow_hosts: ["Zabbix server"]    # hosts the script may run on
 ```
+
+`allow_hosts` and/or `allow_groups` (host group names) is required. Only enabled
+rules get a global script from `mpctl provision` (custom script, executed on the
+agent, `host_access` 3 = write). `make integration` points
+`MONPLAT_REMEDIATION_RULES_FILE` at `tests/integration/remediation.yml`, the same
+rule with `enabled: true`.
+
+Before a script runs, `remediate()` calls `event.get` (`eventids`, `selectHosts`)
+and `trigger.get` (`expandDescription`) and refuses unless the event exists, is a
+trigger event with value PROBLEM, is not acknowledged, belongs to the message's
+`trigger_id` and to exactly one host equal to the message's `host`, its trigger is
+still in PROBLEM with `lastchange` not after the event, and the trigger's own
+name and priority match the rule. The host must be in the rule's allow list.
+Then the cooldown applies. Refusals are stored with `ran = false`.
 
 ## Stack & pinned versions
 
@@ -419,9 +457,17 @@ plan is new.
   - history bucketing,
   - Graphite path sanitising, collisions, wildcard matching, time parsing
     (including `-5min`, `-15min`, `-7d`, `-1mon` and epoch) and render shaping,
-  - alert parsing,
+  - alert parsing, including duplicate/unknown keys, field validation and
+    injected lines inside `value`,
+  - intake token creation and constant-time checking, and 401/503/413 on
+    `POST /api/v1/events`,
+  - bounded trapper reply reads (size cap and one overall deadline),
+  - credentials absent from errors, CLI output, logs and HTTP responses,
+  - Dockerfiles: no apt signature bypass, no plain-HTTP fetches, vendored
+    files checked against committed SHA-256 sums; compose ports on 127.0.0.1,
   - Pushover priority mapping and the request body (requests mocked),
-  - remediation rule matching and cooldown,
+  - remediation rule matching, opt-in, allow lists, confirmation of the event
+    with Zabbix, refusal auditing and cooldown,
   - least-squares fit and hours-to-threshold edge cases (flat or decreasing
     series, too few points),
   - dashboard JSON structure,
@@ -441,7 +487,10 @@ plan is new.
   - that Grafana serves `index.html`, the compiled CSS and the generated
     dashboard,
   - the full alert chain: a breaching trapper value leads to a Zabbix action,
-    `mp_alert.py`, a stored event, a stub push and a remediation row,
+    `mp_alert.py` (with the intake token), a stored event, a stub push and a
+    remediation row; POSTs without the token are refused and store nothing;
+    a forged, authenticated event for a real host runs no script and is
+    audited as refused,
   - forecast over a synthetic rising series leads to the expected
     hours-left value.
 - **Isolation:** a session fixture provisions one dedicated host per test
@@ -469,8 +518,15 @@ plan is new.
   remote commands (`EnableRemoteCommands=1`), which is a security trade-off that
   is acceptable only in this lab.
 - Pushover is only ever a local stub. No real push is sent.
-- No TLS or authentication on the monplat API. It is intended for a trusted
-  lab network only.
+- No TLS on the monplat API. Only event intake is authenticated (shared
+  intake token); the read-only endpoints are open so the browser-side Grafana
+  can call them. Published ports listen on 127.0.0.1 only.
+- The Zabbix 2.4.3 `.deb`s and the Grafana source tarball have no signed
+  index to check against (the Zabbix repository index only lists the newest
+  2.4.x), so they are pinned by SHA-256 sums recorded from an HTTPS download
+  (`docker/zabbix/SHA256SUMS`, `docker/grafana/SHA256SUMS`; the npm tarballs
+  also match the registry's SHA-1). The trusty archive is fetched by apt over
+  HTTP, with apt verifying the archive's signed Release files.
 - WMI/Windows monitoring is not implemented.
 - The stack is orchestrated with a modern `docker compose` file, because
   current Docker no longer reads Fig 1.0 / Compose v1 files.

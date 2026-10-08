@@ -10,12 +10,12 @@ ACTIONS_FILE = os.path.join(ROOT, 'config', 'actions.yml')
 
 SPEC_MESSAGE = ('eventid={EVENT.ID}\n'
                 'status={TRIGGER.STATUS}\n'
-                'host={HOST.NAME}\n'
+                'host={HOST.HOST}\n'
                 'trigger_id={TRIGGER.ID}\n'
                 'trigger_name={TRIGGER.NAME}\n'
                 'severity={TRIGGER.NSEVERITY}\n'
-                'value={ITEM.VALUE}\n'
-                'time={EVENT.DATE} {EVENT.TIME}\n')
+                'time={EVENT.DATE} {EVENT.TIME}\n'
+                'value={ITEM.VALUE}\n')
 
 WRITE_METHODS = ('create', 'update', 'delete', 'addmedia', 'updatemedia',
                  'deletemedia')

@@ -2,6 +2,7 @@ import json
 import socket
 import struct
 import threading
+import time
 
 import pytest
 
@@ -167,3 +168,144 @@ def test_cli_send_exits_one_when_server_rejects_value(monkeypatch, capsys):
     assert code == 1
     out, _ = capsys.readouterr()
     assert 'failed: 1' in out
+
+
+# --- bounded reads of the trapper's reply -------------------------------------
+
+class ScriptedTrapper(object):
+    """A one-shot TCP peer that reads the request and then runs ``script``
+    with the accepted connection, e.g. to stream or trickle a reply."""
+
+    def __init__(self, script):
+        self.script = script
+        self.sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+        self.sock.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+        self.sock.bind(('127.0.0.1', 0))
+        self.sock.listen(1)
+        self.port = self.sock.getsockname()[1]
+        self.thread = threading.Thread(target=self._serve)
+        self.thread.daemon = True
+        self.thread.start()
+
+    def _serve(self):
+        conn, _ = self.sock.accept()
+        try:
+            header = _read_exact(conn, 13)
+            _read_exact(conn, struct.unpack('<Q', header[5:13])[0])
+            self.script(conn)
+        except socket.error:
+            pass  # the client hung up, which is what these tests expect
+        finally:
+            conn.close()
+            self.sock.close()
+
+
+def _endless(conn):
+    while True:
+        conn.sendall(b'x' * 4096)
+
+
+def test_reply_declaring_more_than_the_cap_is_rejected_unread():
+    declared = sender.MAX_RESPONSE + 1
+
+    def script(conn):
+        conn.sendall(b'ZBXD\x01' + struct.pack('<Q', declared))
+        _endless(conn)
+
+    trapper = ScriptedTrapper(script)
+    start = time.time()
+    with pytest.raises(sender.SenderError) as exc:
+        sender.send('127.0.0.1', trapper.port, [('h', 'k', 1, None)],
+                    timeout=5)
+    assert time.time() - start < 2
+    assert str(sender.MAX_RESPONSE) in str(exc.value)
+
+
+def test_huge_declared_length_is_rejected_without_waiting_for_it():
+    def script(conn):
+        conn.sendall(b'ZBXD\x01' + struct.pack('<Q', 2 ** 62))
+        time.sleep(3)
+
+    trapper = ScriptedTrapper(script)
+    start = time.time()
+    with pytest.raises(sender.SenderError):
+        sender.send('127.0.0.1', trapper.port, [('h', 'k', 1, None)],
+                    timeout=10)
+    assert time.time() - start < 2
+
+
+class StreamingSocket(object):
+    """A socket stand-in that answers every recv with a full buffer of
+    data after a valid header, as an endless peer would."""
+
+    def __init__(self, declared):
+        self.pending = bytearray(b'ZBXD\x01' + struct.pack('<Q', declared))
+        self.received = 0
+
+    def settimeout(self, value):
+        pass
+
+    def recv(self, size):
+        if not self.pending:
+            self.pending = bytearray(b'x' * 4096)
+        chunk = bytes(self.pending[:size])
+        del self.pending[:size]
+        self.received += len(chunk)
+        return chunk
+
+
+def test_endless_stream_is_read_only_up_to_the_cap():
+    sock = StreamingSocket(sender.MAX_RESPONSE)
+    raw = sender._recv_frame(sock, time.time() + 5)
+    assert len(raw) == 13 + sender.MAX_RESPONSE
+    assert sock.received == 13 + sender.MAX_RESPONSE
+    with pytest.raises(sender.SenderError):
+        sender.decode_response(raw)
+
+
+def test_endless_stream_over_tcp_ends_in_sender_error():
+    def script(conn):
+        conn.sendall(b'ZBXD\x01' + struct.pack('<Q', sender.MAX_RESPONSE))
+        _endless(conn)
+
+    trapper = ScriptedTrapper(script)
+    start = time.time()
+    with pytest.raises(sender.SenderError):
+        sender.send('127.0.0.1', trapper.port, [('h', 'k', 1, None)],
+                    timeout=5)
+    assert time.time() - start < 3
+
+
+def test_trickling_reply_hits_the_overall_deadline():
+    def script(conn):
+        conn.sendall(b'ZBXD\x01' + struct.pack('<Q', 200))
+        for _ in range(100):
+            conn.sendall(b'x')
+            time.sleep(0.1)
+
+    trapper = ScriptedTrapper(script)
+    start = time.time()
+    with pytest.raises(sender.SenderError) as exc:
+        sender.send('127.0.0.1', trapper.port, [('h', 'k', 1, None)],
+                    timeout=1.0)
+    elapsed = time.time() - start
+    assert 0.8 < elapsed < 2.5
+    assert 'within' in str(exc.value) or 'timed out' in str(exc.value)
+
+
+def test_normal_reply_is_still_parsed_with_the_limits_in_place():
+    reply = _frame(json.dumps({
+        'response': 'success',
+        'info': 'processed: 3; failed: 0; total: 3; '
+                'seconds spent: 0.000050'}).encode('utf-8'))
+
+    def script(conn):
+        # Split the reply over several writes, as a real peer may.
+        for index in range(0, len(reply), 7):
+            conn.sendall(reply[index:index + 7])
+            time.sleep(0.01)
+
+    trapper = ScriptedTrapper(script)
+    result = sender.send('127.0.0.1', trapper.port, [('h', 'k', 1, None)],
+                         timeout=5)
+    assert result == {'processed': 3, 'failed': 0, 'total': 3}

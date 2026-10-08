@@ -4,10 +4,12 @@ import os
 import mock
 import pytest
 
-from monplat import cli, templates
+from monplat import cli, intake, templates
 
 ROOT = os.path.join(os.path.dirname(__file__), '..', '..')
 TEMPLATE_DIR = os.path.join(ROOT, 'config', 'templates')
+INTEGRATION_RULES = os.path.join(ROOT, 'tests', 'integration',
+                                 'remediation.yml')
 
 SPEC = {
     'template': 'Template T',
@@ -368,14 +370,58 @@ def test_provision_dry_run_makes_no_api_writes(tmpdir, capsys):
     out, _ = capsys.readouterr()
     assert 'create' in out and 'Template T' in out
     assert 'MP notify API' in out
-    assert 'MP clear spool' in out
-    assert 'created: 12; updated: 0; unchanged: 0' in out
+    # The shipped remediation rule is disabled, so it gets no script.
+    assert 'MP clear spool' not in out
+    assert 'created: 11; updated: 0; unchanged: 0' in out
+
+
+def test_provision_dry_run_does_not_create_the_intake_token(tmpdir, capsys):
+    token_file = os.environ['MONPLAT_API_INTAKE_TOKEN_FILE']
+    with mock.patch('monplat.zabbix.api.connect',
+                    return_value=empty_zabbix()):
+        cli.main(['provision', '--dry-run',
+                  '--templates', write_spec_dir(tmpdir, VALID_YAML)])
+    assert not os.path.exists(token_file)
+
+
+def test_provision_creates_the_intake_token_once(tmpdir, capsys):
+    token_file = os.environ['MONPLAT_API_INTAKE_TOKEN_FILE']
+    specs = write_spec_dir(tmpdir, VALID_YAML)
+    with mock.patch('monplat.zabbix.api.connect',
+                    return_value=empty_zabbix()):
+        assert cli.main(['provision', '--templates', specs]) == 0
+        token = intake.read_token(token_file)
+        out, _ = capsys.readouterr()
+        assert cli.main(['provision', '--templates', specs]) == 0
+        again, _ = capsys.readouterr()
+    assert token and len(token) == 64
+    assert 'created   token       intake token' in out
+    assert 'unchanged token       intake token' in again
+    assert intake.read_token(token_file) == token
+    # The token itself is never printed.
+    assert token not in out + again
+
+
+def test_provision_exits_1_when_the_token_cannot_be_written(tmpdir, capsys,
+                                                           monkeypatch):
+    blocker = tmpdir.join('file')
+    blocker.write('')
+    monkeypatch.setenv('MONPLAT_API_INTAKE_TOKEN_FILE',
+                       str(blocker.join('intake.token')))
+    with mock.patch('monplat.zabbix.api.connect') as connect:
+        code = cli.main(['provision',
+                         '--templates', write_spec_dir(tmpdir, VALID_YAML)])
+    assert code == 1
+    assert not connect.called
+    _, err = capsys.readouterr()
+    assert 'intake token' in err
 
 
 def test_provision_applies_and_prints_summary(tmpdir, capsys):
     zapi = empty_zabbix()
     with mock.patch('monplat.zabbix.api.connect', return_value=zapi):
         code = cli.main(['provision',
+                         '--remediation', INTEGRATION_RULES,
                          '--templates', write_spec_dir(tmpdir, VALID_YAML)])
     assert code == 0
     assert zapi.template.create.called

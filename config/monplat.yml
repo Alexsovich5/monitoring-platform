@@ -9,10 +9,15 @@ database:
   monplat_dsn: "host=db dbname=monplat user=monplat password=monplat"
 api:
   url: http://api:5000
+  # Shared secret for POST /api/v1/events, created by "mpctl provision" in
+  # the monplat-secrets volume (never committed).
+  intake_token_file: /var/lib/monplat/secrets/intake.token
 notify:
   pushover_url: http://pushover-stub:8025/1/messages.json
   token: stub-app-token
   user: stub-user-key
+remediation:
+  rules_file: config/remediation.yml
 forecast:
   window_hours: 6
   horizon_hours: 24

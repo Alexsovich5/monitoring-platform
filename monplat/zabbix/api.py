@@ -8,10 +8,16 @@ a wrong password, are raised at once.
 ``get_or_create()`` makes provisioning idempotent: it looks an object up by
 a filter and only calls ``<object>.create`` when nothing matches.
 """
+import logging
 import time
 
 import requests
 from pyzabbix import ZabbixAPI, ZabbixAPIException
+
+# pyzabbix logs every JSON-RPC request and response at DEBUG, including the
+# user.login password and the session token in "auth".  Keep that logger
+# above DEBUG whatever level the application runs at.
+logging.getLogger('pyzabbix').setLevel(logging.INFO)
 
 # API objects whose id field is not simply "<object>id".
 ID_FIELDS = {

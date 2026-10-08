@@ -33,7 +33,8 @@ def build_parser():
                                 '(default: config/actions.yml)')
     provision.add_argument('--remediation', metavar='FILE', default=None,
                            help='remediation rules whose global scripts are '
-                                'created (default: config/remediation.yml)')
+                                'created (default: remediation.rules_file '
+                                'from the config)')
     provision.add_argument('--dry-run', action='store_true',
                            help='print the planned changes without '
                                 'applying them')
@@ -94,6 +95,28 @@ def cmd_send(args):
     return 0 if result['failed'] == 0 else 1
 
 
+def _install_intake_token(cfg, dry_run):
+    """Create the alert intake token file on first run; return False and
+    report on stderr when it cannot be written."""
+    from monplat import intake
+
+    path = intake.token_path(cfg)
+    if dry_run:
+        exists = intake.read_token(path) is not None
+        print('%-9s %-11s %s' % ('unchanged' if exists else 'create',
+                                 'token', 'intake token'))
+        return True
+    try:
+        _, created = intake.ensure_token(path)
+    except (IOError, OSError) as exc:
+        sys.stderr.write('mpctl provision: cannot write intake token %s: '
+                         '%s\n' % (path, exc))
+        return False
+    print('%-9s %-11s %s' % ('created' if created else 'unchanged', 'token',
+                             'intake token'))
+    return True
+
+
 def cmd_provision(args):
     import requests
     from pyzabbix import ZabbixAPIException
@@ -102,12 +125,17 @@ def cmd_provision(args):
     from monplat.zabbix import api
 
     try:
+        cfg = config.load()
+    except config.ConfigError as exc:
+        sys.stderr.write('mpctl provision: %s\n' % exc)
+        return 1
+    try:
         specs = templates.load_specs(args.templates or templates.DEFAULT_DIR)
         for spec in specs:
             templates.validate(spec)
         alerting = actions.load(args.actions or actions.DEFAULT_PATH)
         rules = remediation.load_rules(args.remediation or
-                                       remediation.DEFAULT_PATH)
+                                       remediation.rules_path(cfg))
     except templates.SpecError as exc:
         sys.stderr.write('mpctl provision: %s\n' % exc)
         return 2
@@ -115,10 +143,12 @@ def cmd_provision(args):
         sys.stderr.write('mpctl provision: no *.yml specs in %s\n'
                          % (args.templates or templates.DEFAULT_DIR))
         return 2
+    # The alert action sends the token, so it exists before the action.
+    if not _install_intake_token(cfg, args.dry_run):
+        return 1
 
     totals = dict((action, 0) for action in templates.ACTIONS)
     try:
-        cfg = config.load()
         zapi = api.connect(cfg)
         # Templates first, then the alert media type, media and action,
         # then the remediation scripts.
@@ -133,7 +163,7 @@ def cmd_provision(args):
                 templates.apply(zapi, changes)
             for action, count in templates.summary(changes).items():
                 totals[action] += count
-    except (config.ConfigError, api.ZabbixUnavailable, ZabbixAPIException,
+    except (api.ZabbixUnavailable, ZabbixAPIException,
             requests.RequestException, templates.SpecError) as exc:
         sys.stderr.write('mpctl provision: %s\n' % exc)
         return 1

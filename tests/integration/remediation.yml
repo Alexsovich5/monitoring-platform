@@ -1,10 +1,8 @@
-# Remediation rules applied by the API to PROBLEM events.  A rule only acts
-# when "enabled: true"; "mpctl provision" then creates its Zabbix global
-# script from "script" and "command".  The API confirms each event with the
-# Zabbix API and runs the script only on hosts in allow_hosts/allow_groups.
+# The shipped rules with clear-spool enabled, used by "make integration"
+# (MONPLAT_REMEDIATION_RULES_FILE) to exercise remediation end to end.
 rules:
   - name: clear-spool
-    enabled: false                    # opt in per rule
+    enabled: true
     trigger_match: "^Spool directory too large"
     min_severity: warning
     script: "MP clear spool"          # Zabbix global script, created by provision

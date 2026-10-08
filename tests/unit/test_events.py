@@ -18,8 +18,8 @@ BODY = ('eventid=1234\n'
         'trigger_id=13555\n'
         'trigger_name=High CPU on mp-test-alert\n'
         'severity=4\n'
-        'value=99 %\n'
-        'time=2014.12.18 12:34:56\n')
+        'time=2014.12.18 12:34:56\n'
+        'value=99 %\n')
 
 
 def body(**changes):
@@ -96,6 +96,96 @@ def test_parse_alert_rejects_a_bad_time():
     with pytest.raises(events.EventError) as exc:
         events.parse_alert(SUBJECT, body(time='yesterday'))
     assert 'time' in str(exc.value)
+
+
+def test_value_is_last_and_swallows_injected_lines():
+    injected = '99\nstatus=OK\neventid=1\nhost=other'
+    event = events.parse_alert(SUBJECT, body(value=injected))
+    assert event.item_value == injected
+    assert event.status == 'PROBLEM'
+    assert event.eventid == 1234
+    assert event.host == 'mp-test-alert'
+
+
+def test_injected_lines_in_a_value_with_crlf_stay_in_the_value():
+    raw = body(value='5\r\nstatus=OK').replace('\n', '\r\n')
+    event = events.parse_alert(SUBJECT, raw)
+    assert event.status == 'PROBLEM'
+    assert 'status=OK' in event.item_value
+
+
+@pytest.mark.parametrize('extra', ['status=OK', 'eventid=1',
+                                   'host=mp-test-alert'])
+def test_a_duplicate_key_before_value_is_rejected(extra):
+    raw = extra + '\n' + BODY
+    with pytest.raises(events.EventError) as exc:
+        events.parse_alert(SUBJECT, raw)
+    assert 'duplicate' in str(exc.value)
+
+
+def test_an_unknown_key_is_rejected():
+    with pytest.raises(events.EventError) as exc:
+        events.parse_alert(SUBJECT, 'colour=red\n' + BODY)
+    assert 'unknown' in str(exc.value)
+
+
+def test_a_line_without_key_and_value_is_rejected():
+    raw = BODY.replace('trigger_name=High CPU on mp-test-alert\n',
+                       'trigger_name=High CPU\non mp-test-alert\n')
+    with pytest.raises(events.EventError):
+        events.parse_alert(SUBJECT, raw)
+
+
+def test_a_body_without_value_line_is_rejected():
+    with pytest.raises(events.EventError) as exc:
+        events.parse_alert(SUBJECT, body(value=None))
+    assert 'value' in str(exc.value)
+
+
+def test_fields_after_value_are_not_read_as_fields():
+    # A message in the old order (value before time) has no time field.
+    raw = body(time=None) + 'time=2014.12.18 12:34:56\n'
+    lines = raw.splitlines()
+    assert lines[-2].startswith('value=') and lines[-1].startswith('time=')
+    with pytest.raises(events.EventError) as exc:
+        events.parse_alert(SUBJECT, raw)
+    assert 'time' in str(exc.value)
+
+
+def test_an_oversized_message_is_rejected():
+    raw = body(value='x' * (events.MAX_BODY + 1))
+    with pytest.raises(events.EventError) as exc:
+        events.parse_alert(SUBJECT, raw)
+    assert 'too large' in str(exc.value)
+
+
+@pytest.mark.parametrize('field, bad', [
+    ('eventid', '+1234'), ('eventid', '-5'), ('eventid', '12 34'),
+    ('eventid', '0x10'), ('trigger_id', '13555; drop'),
+    ('trigger_id', '-1'), ('status', 'problem'),
+    ('host', 'mp-test-alert\tx'), ('host', 'a;b'), ('host', 'a' * 129),
+    ('host', ''), ('time', '2014.12.18'),
+])
+def test_fields_are_strictly_validated(field, bad):
+    with pytest.raises(events.EventError) as exc:
+        events.parse_alert(SUBJECT, body(**{field: bad}))
+    assert field in str(exc.value)
+
+
+def test_host_names_with_zabbix_host_name_characters_are_accepted():
+    for host in ('Zabbix server', 'mp_test.alert-1'):
+        assert events.parse_alert(SUBJECT, body(host=host)).host == host
+
+
+def test_long_values_and_trigger_names_are_cut_to_the_column_size():
+    event = events.parse_alert(SUBJECT, body(value='v' * 300,
+                                             trigger_name='t' * 300))
+    assert event.item_value == 'v' * 255
+    assert event.trigger_name == 't' * 255
+
+
+def test_an_empty_value_is_stored_as_null():
+    assert events.parse_alert(SUBJECT, body(value='')).item_value is None
 
 
 # --- store -------------------------------------------------------------------
@@ -210,13 +300,28 @@ def test_release_notification_clears_the_flag():
 
 # --- HTTP API ---------------------------------------------------------------
 
+class TokenClient(object):
+    """A Flask test client that sends the intake token on POSTs."""
+
+    def __init__(self, client, headers):
+        self.client = client
+        self.headers = headers
+
+    def post(self, *args, **kwargs):
+        kwargs.setdefault('headers', self.headers)
+        return self.client.post(*args, **kwargs)
+
+    def get(self, *args, **kwargs):
+        return self.client.get(*args, **kwargs)
+
+
 @pytest.yield_fixture
-def client():
+def client(intake):
     with mock.patch('monplat.api.app.db.connect') as connect:
         connect.return_value = mock.MagicMock(name='conn')
-        app = create_app(CFG)
+        app = create_app(intake.cfg(CFG))
         app.testing = True
-        yield app.test_client(), connect
+        yield TokenClient(app.test_client(), intake.headers), connect
 
 
 def _json(response):
@@ -286,7 +391,7 @@ def test_post_event_pushes_the_parsed_event_once_claimed(client, push, claim,
         http.post('/api/v1/events', data={'subject': SUBJECT, 'body': BODY})
     assert claim.call_args[0][1] == 7
     cfg, event = push.call_args[0]
-    assert cfg is CFG
+    assert cfg['database'] is CFG['database']
     assert (event.eventid, event.status, event.trigger_name) == \
         (1234, 'PROBLEM', 'High CPU on mp-test-alert')
     assert not release.called
@@ -315,6 +420,77 @@ def test_already_notified_event_is_not_pushed_again(client, push, claim,
     assert _json(response)['notified'] is True
     assert not push.called
     assert not release.called
+
+
+# --- intake authentication -------------------------------------------------
+
+SENTINEL = 'S3NTINEL-intake-token'
+
+
+@pytest.mark.parametrize('headers', [
+    {}, {'X-Monplat-Token': ''}, {'X-Monplat-Token': 'wrong'},
+    {'X-Monplat-Token': 'a' * 64},
+])
+def test_post_event_without_the_right_token_is_401_and_stores_nothing(
+        client, push, headers):
+    http, connect = client
+    with mock.patch('monplat.api.app.events.store') as store:
+        response = http.post('/api/v1/events', headers=headers,
+                             data={'subject': SUBJECT, 'body': BODY})
+    assert response.status_code == 401
+    assert 'token' in _json(response)['error'].lower()
+    assert not store.called
+    assert not push.called
+    assert not connect.called
+
+
+def test_post_event_is_503_when_no_token_is_configured(tmpdir, push):
+    cfg = dict(CFG, api={'intake_token_file': str(tmpdir.join('none'))})
+    with mock.patch('monplat.api.app.db.connect') as connect, \
+            mock.patch('monplat.api.app.events.store') as store:
+        app = create_app(cfg)
+        response = app.test_client().post(
+            '/api/v1/events', headers={'X-Monplat-Token': ''},
+            data={'subject': SUBJECT, 'body': BODY})
+    assert response.status_code == 503
+    assert str(tmpdir) not in response.data.decode('utf-8')
+    assert not store.called
+    assert not connect.called
+
+
+def test_intake_errors_never_echo_the_token(tmpdir, push):
+    path = tmpdir.join('intake.token')
+    path.write(SENTINEL)
+    cfg = dict(CFG, api={'intake_token_file': str(path)})
+    app = create_app(cfg)
+    http = app.test_client()
+    with mock.patch('monplat.api.app.db.connect'), \
+            mock.patch('monplat.api.app.events.store', return_value=1):
+        responses = [
+            http.post('/api/v1/events', data={'body': BODY},
+                      headers={'X-Monplat-Token': SENTINEL[:-1]}),
+            http.post('/api/v1/events', data={'body': BODY}),
+            http.post('/api/v1/events', data={'body': body(eventid=None)},
+                      headers={'X-Monplat-Token': SENTINEL}),
+        ]
+    assert [r.status_code for r in responses] == [401, 401, 400]
+    for response in responses:
+        assert SENTINEL not in response.data.decode('utf-8')
+
+
+def test_oversized_request_is_413_and_not_stored(client, push):
+    http, _ = client
+    with mock.patch('monplat.api.app.events.store') as store:
+        response = http.post('/api/v1/events', data={
+            'subject': SUBJECT, 'body': 'x' * (128 * 1024)})
+    assert response.status_code == 413
+    assert not store.called
+
+
+def test_listing_events_needs_no_token(client):
+    http, connect = client
+    connect.return_value.cursor.return_value.fetchall.return_value = []
+    assert http.client.get('/api/v1/events').status_code == 200
 
 
 def test_post_event_without_body_is_400(client):

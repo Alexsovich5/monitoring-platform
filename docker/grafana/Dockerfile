@@ -1,10 +1,14 @@
 FROM node:0.10
 
 # Everything comes from docker/grafana/vendor/, filled on the host by
-# "make grafana-vendor": node 0.10's OpenSSL and CA list cannot be relied on
-# against current GitHub and npm TLS chains, so nothing is fetched here.
+# "make grafana-vendor" over HTTPS: node 0.10's OpenSSL and CA list cannot
+# be relied on against current GitHub and npm TLS chains, so nothing is
+# fetched here.  The files are checked against the committed SHA256SUMS
+# before they are unpacked or installed.
+COPY SHA256SUMS /tmp/vendor/SHA256SUMS
 COPY vendor/ /tmp/vendor/
-RUN mkdir /grafana \
+RUN cd /tmp/vendor && sha256sum -c SHA256SUMS \
+ && mkdir /grafana \
  && tar xzf /tmp/vendor/v1.9.1.tar.gz --strip-components=1 -C /grafana
 
 # less 1.4.2 lists mime, request, mkdirp and ycssmin as optional

@@ -20,9 +20,10 @@ Personal project built on the 2014-era stack (Zabbix 2.4.3, Python 2.7, PostgreS
   `docker-compose.yml`; tested by `tests/integration/test_zabbix_up.py`.
 - YAML configuration with `MONPLAT_<SECTION>_<KEY>` environment overrides:
   `monplat/config.py`; tested by `tests/unit/test_config.py`.
-- Zabbix sender protocol (`ZBXD\x01` framing) in Python and `mpctl send`:
-  `monplat/zabbix/sender.py`; tested by `tests/unit/test_sender.py` against an
-  in-process fake trapper.
+- Zabbix sender protocol (`ZBXD\x01` framing) in Python and `mpctl send`,
+  with a 64 KiB cap on the reply and one deadline for the whole exchange:
+  `monplat/zabbix/sender.py`; tested by `tests/unit/test_sender.py` against
+  in-process fake trappers (normal, oversized, endless and trickling replies).
 - Templates, applications, items, triggers, hosts and template links
   provisioned idempotently from `config/templates/*.yml` with
   `mpctl provision`: `monplat/templates.py`, `monplat/zabbix/api.py`,
@@ -56,13 +57,22 @@ Personal project built on the 2014-era stack (Zabbix 2.4.3, Python 2.7, PostgreS
   `monplat/events.py`, `monplat/actions.py`, `sql/monplat_schema.sql`; tested
   by `tests/unit/test_mp_alert.py`, `tests/unit/test_events.py`,
   `tests/unit/test_actions.py` and `tests/integration/test_alert_chain.py`.
+  Event intake needs a shared token that `mpctl provision` generates into the
+  `monplat-secrets` volume (never committed) and the alertscript sends as
+  `X-Monplat-Token`; the message body is parsed strictly, with `value=` last
+  so item values cannot inject fields: `monplat/intake.py`; tested by
+  `tests/unit/test_intake.py`, `tests/unit/test_events.py` and
+  `tests/integration/test_alert_chain.py`.
 - Push notifications to a Pushover-compatible API with severity-to-priority
   mapping: `monplat/notify.py`, `tests/stubs/pushover_stub.py`; tested by
   `tests/unit/test_notify.py` and `tests/unit/test_pushover_stub.py`.
-- Auto-remediation: rules in `config/remediation.yml` run Zabbix global
-  scripts on the affected host through `script.execute`, with a per-host,
-  per-rule cooldown: `monplat/remediation.py`; tested by
-  `tests/unit/test_remediation.py` and `tests/integration/test_remediation.py`.
+- Auto-remediation: opt-in rules in `config/remediation.yml` run Zabbix
+  global scripts through `script.execute` once the Zabbix API confirms the
+  event as a current, unacknowledged PROBLEM on a host in the rule's allow
+  list, with a per-host, per-rule cooldown; runs and refusals are both
+  recorded: `monplat/remediation.py`; tested by
+  `tests/unit/test_remediation.py` and `tests/integration/test_remediation.py`
+  (with `tests/integration/remediation.yml`, which enables the rule).
 - Predictive alerting: a least-squares fit over recent history gives the hours
   left before a threshold, sent to a trapper item that a trigger watches
   (`mpctl forecast`): `monplat/forecast.py`; tested by
@@ -91,12 +101,24 @@ Personal project built on the 2014-era stack (Zabbix 2.4.3, Python 2.7, PostgreS
   rejected.
 - The capacity forecast is a single-window linear least-squares fit; it does
   not model seasonality.
-- Remediation only runs pre-registered Zabbix global scripts, and it needs
-  `EnableRemoteCommands=1` on the agent (set in
-  `docker/zabbix/zabbix_agentd.conf`). That is a security trade-off that is
-  acceptable only in this lab.
-- The monplat API has no TLS and no authentication; it is meant for a trusted
-  lab network only.
+- Remediation is off by default; set `enabled: true` on a rule in
+  `config/remediation.yml` (or point `MONPLAT_REMEDIATION_RULES_FILE` at
+  another file) and rerun `mpctl provision`. It only runs pre-registered
+  Zabbix global scripts, and it needs `EnableRemoteCommands=1` on the agent
+  (set in `docker/zabbix/zabbix_agentd.conf`), which also lets the `app` test
+  runner send remote commands to that agent. That is a security trade-off that
+  is acceptable only in this lab.
+- The monplat API has no TLS. Only event intake is authenticated; the
+  read-only endpoints are open so Grafana can call them, and `/render` does
+  not limit how many series or how long a range it reads. Published ports
+  listen on 127.0.0.1 only.
+- supervisord's XML-RPC port in the `zabbix` container has no password; it is
+  reachable only on the compose network.
+- The Zabbix 2.4.3 packages and the Grafana source tarball are pinned by
+  SHA-256 sums recorded from an HTTPS download (`docker/zabbix/SHA256SUMS`,
+  `docker/grafana/SHA256SUMS`), since no signed index covers them. Trusty
+  packages come from the Ubuntu archive over HTTP, checked by apt against the
+  archive's signed Release files.
 - The stack uses a modern `docker compose` file (a `services:` key, no
   `version`) because current Docker no longer reads Fig 1.0 / Compose v1
   files.
@@ -124,7 +146,7 @@ Personal project built on the 2014-era stack (Zabbix 2.4.3, Python 2.7, PostgreS
 Everything runs in Docker images from the project's era, so nothing needs installing locally beyond Docker.
 
 ```bash
-make build                                    # fetch Grafana sources, build the images
+make build                                    # fetch Zabbix packages and Grafana sources, build the images
 docker compose up -d db zabbix snmpsim api pushover-stub grafana
 docker compose run --rm --no-deps app scripts/wait_for_stack.sh
 docker compose run --rm app mpctl provision   # templates, hosts, scripts, action
@@ -166,6 +188,7 @@ but nothing is tested against real servers, network devices or Pushover.
 |   |       `-- 01-databases.sh
 |   |-- grafana
 |   |   |-- Dockerfile
+|   |   |-- SHA256SUMS
 |   |   |-- build-css.sh
 |   |   |-- config.js
 |   |   `-- package.json
@@ -176,6 +199,7 @@ but nothing is tested against real servers, network devices or Pushover.
 |       |-- alertscripts
 |       |   `-- mp_alert.py
 |       |-- Dockerfile
+|       |-- SHA256SUMS
 |       |-- apache-zabbix.conf
 |       |-- entrypoint.sh
 |       |-- run-daemon.sh
@@ -210,6 +234,7 @@ but nothing is tested against real servers, network devices or Pushover.
 |   |-- events.py
 |   |-- forecast.py
 |   |-- history.py
+|   |-- intake.py
 |   |-- notify.py
 |   |-- remediation.py
 |   |-- templates.py
@@ -223,6 +248,7 @@ but nothing is tested against real servers, network devices or Pushover.
 |   |-- integration
 |   |   |-- __init__.py
 |   |   |-- conftest.py
+|   |   |-- remediation.yml
 |   |   |-- test_alert_chain.py
 |   |   |-- test_api_http.py
 |   |   |-- test_collect.py
@@ -239,21 +265,25 @@ but nothing is tested against real servers, network devices or Pushover.
 |   |   `-- pushover_stub.py
 |   |-- unit
 |   |   |-- __init__.py
+|   |   |-- conftest.py
 |   |   |-- test_actions.py
 |   |   |-- test_api.py
 |   |   |-- test_cli.py
 |   |   |-- test_collector.py
 |   |   |-- test_config.py
 |   |   |-- test_dashboards.py
+|   |   |-- test_deploy.py
 |   |   |-- test_events.py
 |   |   |-- test_forecast.py
 |   |   |-- test_graphite.py
 |   |   |-- test_history.py
+|   |   |-- test_intake.py
 |   |   |-- test_mp_alert.py
 |   |   |-- test_notify.py
 |   |   |-- test_pushover_stub.py
 |   |   |-- test_readme.py
 |   |   |-- test_remediation.py
+|   |   |-- test_secret_leaks.py
 |   |   |-- test_sender.py
 |   |   |-- test_templates.py
 |   |   |-- test_templates_snmp.py

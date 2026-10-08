@@ -17,14 +17,17 @@ action:
   recovery_msg: 1
   subject: "{TRIGGER.STATUS}: {TRIGGER.NAME}"
   recovery_subject: "{TRIGGER.STATUS}: {TRIGGER.NAME}"
+  # value= stays last: the API reads everything after it as the value, so
+  # an item value cannot add or override fields.  {HOST.HOST} is the
+  # technical host name, which only uses host-name characters.
   message: |
     eventid={EVENT.ID}
     status={TRIGGER.STATUS}
-    host={HOST.NAME}
+    host={HOST.HOST}
     trigger_id={TRIGGER.ID}
     trigger_name={TRIGGER.NAME}
     severity={TRIGGER.NSEVERITY}
-    value={ITEM.VALUE}
     time={EVENT.DATE} {EVENT.TIME}
+    value={ITEM.VALUE}
   conditions:
     - {conditiontype: 5, operator: 0, value: 1}   # Trigger value = PROBLEM

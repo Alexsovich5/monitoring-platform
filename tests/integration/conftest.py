@@ -6,7 +6,7 @@ import xmlrpclib
 
 import pytest
 
-from monplat import config, templates
+from monplat import config, intake, templates
 from monplat.zabbix import api, sender
 
 STOCK_HOST = 'Zabbix server'
@@ -28,6 +28,15 @@ def zapi(cfg):
     if hosts and hosts[0]['status'] != '0':
         zapi.host.update(hostid=hosts[0]['hostid'], status=0)
     return zapi
+
+
+def intake_headers(cfg):
+    """The header that authenticates a POST to /api/v1/events, read from
+    the token file that the Makefile's provision step created."""
+    token = intake.read_token(intake.token_path(cfg))
+    if not token:
+        pytest.fail('no intake token; run "mpctl provision" first')
+    return {intake.HEADER: token}
 
 
 def wait_for(check, timeout, interval=2, message='condition not met'):

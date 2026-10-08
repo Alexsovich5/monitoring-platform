@@ -1,25 +1,37 @@
 """Run Zabbix global scripts for PROBLEM events that match a rule.
 
-Rules live in ``config/remediation.yml``::
+Rules live in ``config/remediation.yml`` (``remediation.rules_file`` in
+the config)::
 
     rules:
       - name: clear-spool
+        enabled: false                                # opt-in per rule
         trigger_match: "^Spool directory too large"   # re.match on the name
         min_severity: warning                         # name or 0-5
         script: "MP clear spool"                      # Zabbix global script
         command: "rm -f /var/spool/mp-demo/* && echo cleared"
         expect_output: cleared                        # optional
         cooldown_seconds: 600
+        allow_hosts: ["Zabbix server"]                # and/or allow_groups
 
-``mpctl provision`` creates each rule's global script from ``script`` and
-``command`` (see ``monplat.actions.plan_scripts``).  ``remediate()`` runs
-the script on the event's host through ``script.execute``, which has the
-Zabbix server ask the host's agent to run the command.  A run counts as
-successful only when Zabbix reports success and, if the rule sets
-``expect_output``, the output contains that text.  Every run, successful
-or not, is written to ``monplat.remediations``; a rule does not run again
-for the same host until ``cooldown_seconds`` have passed since its last
-run.
+``mpctl provision`` creates the global script of each enabled rule from
+``script`` and ``command`` (see ``monplat.actions.plan_scripts``).
+
+The notification that reaches the API is not trusted for anything but the
+event id.  ``remediate()`` fetches the event and its trigger from the
+Zabbix API and only goes on when the event exists, is a trigger PROBLEM
+that is neither acknowledged nor already resolved (its trigger is still in
+PROBLEM and last changed at the event), belongs to the trigger id and the
+single host named in the message, and the trigger's own name and severity
+match the rule.  The host must then be in the rule's ``allow_hosts`` or in
+one of its ``allow_groups``.  The script runs through ``script.execute``
+on the hostid reported by Zabbix.
+
+Every outcome is written to ``monplat.remediations``: runs (``ran``
+true, ``ok`` telling whether Zabbix reported success and, if the rule sets
+``expect_output``, the output contains it) and refusals, including rate
+limiting (``ran`` false).  A rule does not run again for the same host
+until ``cooldown_seconds`` have passed since its last run.
 """
 import collections
 import datetime
@@ -35,17 +47,27 @@ from monplat.templates import SEVERITIES, SpecError
 DEFAULT_PATH = os.path.join('config', 'remediation.yml')
 
 Rule = collections.namedtuple(
-    'Rule', 'name pattern min_severity script command expect_output '
-            'cooldown_seconds')
+    'Rule', 'name enabled pattern min_severity script command expect_output '
+            'cooldown_seconds allow_hosts allow_groups')
+
+# Zabbix 2.4 event and trigger values.
+SOURCE_TRIGGERS = '0'
+OBJECT_TRIGGER = '0'
+VALUE_PROBLEM = '1'
 
 _REQUIRED = ('name', 'trigger_match', 'min_severity', 'script', 'command',
              'cooldown_seconds')
 
 _RECENT_RUN = ('SELECT 1 FROM remediations '
-               'WHERE host = %s AND rule = %s AND executed_at > %s LIMIT 1')
+               'WHERE host = %s AND rule = %s AND executed_at > %s AND ran '
+               'LIMIT 1')
 _INSERT = ('INSERT INTO remediations '
-           '(event_id, rule, host, script_name, ok, output) '
-           'VALUES (%s, %s, %s, %s, %s, %s)')
+           '(event_id, rule, host, script_name, ok, output, ran) '
+           'VALUES (%s, %s, %s, %s, %s, %s, %s)')
+
+
+class Refused(Exception):
+    """The event is not acted on; the message says why."""
 
 log = logging.getLogger(__name__)
 
@@ -56,6 +78,21 @@ def _severity(value, where):
     if value in SEVERITIES:
         return SEVERITIES[value]
     raise SpecError('%s: unknown min_severity %r' % (where, value))
+
+
+def rules_path(cfg):
+    """Return the rules file named by the config, or ``DEFAULT_PATH``."""
+    return (cfg.get('remediation') or {}).get('rules_file') or DEFAULT_PATH
+
+
+def _names(data, field, where):
+    value = data.get(field)
+    if value is None:
+        return ()
+    if not isinstance(value, list) or not all(
+            isinstance(v, basestring) and v for v in value):
+        raise SpecError('%s: %s must be a list of names' % (where, field))
+    return tuple(value)
 
 
 def _rule(data, where):
@@ -76,13 +113,24 @@ def _rule(data, where):
         cooldown = -1
     if cooldown < 0:
         raise SpecError('%s: cooldown_seconds must be a number >= 0' % where)
+    enabled = data.get('enabled', False)
+    if not isinstance(enabled, bool):
+        raise SpecError('%s: enabled must be true or false' % where)
+    allow_hosts = _names(data, 'allow_hosts', where)
+    allow_groups = _names(data, 'allow_groups', where)
+    if not allow_hosts and not allow_groups:
+        raise SpecError('%s: needs allow_hosts and/or allow_groups, the '
+                        'hosts the script may run on' % where)
     return Rule(name=str(data['name']),
+                enabled=enabled,
                 pattern=pattern,
                 min_severity=_severity(data['min_severity'], where),
                 script=str(data['script']),
                 command=str(data['command']),
                 expect_output=data.get('expect_output') or None,
-                cooldown_seconds=cooldown)
+                cooldown_seconds=cooldown,
+                allow_hosts=allow_hosts,
+                allow_groups=allow_groups)
 
 
 def load_rules(path=DEFAULT_PATH):
@@ -104,17 +152,21 @@ def load_rules(path=DEFAULT_PATH):
     return rules
 
 
-def match(rules, event):
-    """Return the first rule for a PROBLEM ``event`` whose pattern matches
-    the trigger name at its start and whose minimum severity is reached,
-    or None.  OK events never match."""
-    if event.status != 'PROBLEM':
-        return None
+def _rule_for(rules, trigger_name, severity):
     for rule in rules:
-        if (event.severity >= rule.min_severity and
-                rule.pattern.match(event.trigger_name)):
+        if (rule.enabled and severity >= rule.min_severity and
+                rule.pattern.match(trigger_name)):
             return rule
     return None
+
+
+def match(rules, event):
+    """Return the first enabled rule for a PROBLEM ``event`` whose pattern
+    matches the trigger name at its start and whose minimum severity is
+    reached, or None.  OK events never match."""
+    if event.status != 'PROBLEM':
+        return None
+    return _rule_for(rules, event.trigger_name, event.severity)
 
 
 def in_cooldown(conn, host, rule, now):
@@ -129,12 +181,13 @@ def in_cooldown(conn, host, rule, now):
         cursor.close()
 
 
-def record(conn, event_id, rule, host, ok, output):
-    """Append one run to ``monplat.remediations``."""
+def record(conn, event_id, rule, host, ok, output, ran=True):
+    """Append one outcome to ``monplat.remediations``; ``ran`` is false
+    for refusals."""
     cursor = conn.cursor()
     try:
         cursor.execute(_INSERT, (event_id, rule.name, host, rule.script,
-                                 ok, output))
+                                 ok, output, ran))
         conn.commit()
     finally:
         cursor.close()
@@ -145,24 +198,74 @@ def result(rule, host, ran, ok, output):
             'ran': ran, 'ok': ok, 'output': output}
 
 
-def _hostid(zapi, host):
-    # {HOST.NAME} is the visible name, which defaults to the host name.
-    for field in ('host', 'name'):
-        found = zapi.host.get(filter={field: host}, output=['hostid', 'host'])
-        if found:
-            return found[0]['hostid']
-    return None
+def _confirm(zapi, event, rule):
+    """Return ``(hostid, host)`` from Zabbix for the PROBLEM behind
+    ``event``, or raise ``Refused``."""
+    found = zapi.event.get(eventids=[event.eventid], output='extend',
+                           selectHosts=['hostid', 'host'])
+    if not found:
+        raise Refused('event %d not found in Zabbix' % event.eventid)
+    zevent = found[0]
+    if (str(zevent.get('source')) != SOURCE_TRIGGERS or
+            str(zevent.get('object')) != OBJECT_TRIGGER):
+        raise Refused('event %d is not a trigger event' % event.eventid)
+    if str(zevent.get('value')) != VALUE_PROBLEM:
+        raise Refused('event %d is not a PROBLEM in Zabbix' % event.eventid)
+    if str(zevent.get('acknowledged', '0')) != '0':
+        raise Refused('event %d is acknowledged' % event.eventid)
+    if str(zevent.get('objectid')) != str(event.trigger_id):
+        raise Refused('event %d belongs to trigger %s, not %d'
+                      % (event.eventid, zevent.get('objectid'),
+                         event.trigger_id))
+    hosts = zevent.get('hosts') or []
+    if len(hosts) != 1:
+        raise Refused('event %d does not belong to exactly one host'
+                      % event.eventid)
+    hostid, host = hosts[0]['hostid'], hosts[0]['host']
+    if host != event.host:
+        raise Refused('message names host %r but Zabbix has %r'
+                      % (event.host, host))
+    triggers = zapi.trigger.get(triggerids=[zevent['objectid']],
+                                output=['triggerid', 'description',
+                                        'priority', 'value', 'lastchange'],
+                                expandDescription=True)
+    if not triggers:
+        raise Refused('trigger %s not found in Zabbix' % zevent['objectid'])
+    trigger = triggers[0]
+    if str(trigger.get('value')) != VALUE_PROBLEM:
+        raise Refused('trigger %s is no longer in PROBLEM'
+                      % trigger['triggerid'])
+    if int(zevent.get('clock', 0)) < int(trigger.get('lastchange', 0)):
+        raise Refused('event %d is not the current problem of trigger %s'
+                      % (event.eventid, trigger['triggerid']))
+    if _rule_for([rule], trigger.get('description', ''),
+                 int(trigger.get('priority', -1))) is None:
+        raise Refused('trigger %r (severity %s) in Zabbix does not match '
+                      'rule %s' % (trigger.get('description'),
+                                   trigger.get('priority'), rule.name))
+    return hostid, host
 
 
-def _execute(zapi, rule, host):
-    """Run the rule's script on ``host``; return ``(ok, output)``."""
+def _check_allowed(zapi, rule, hostid, host):
+    if host in rule.allow_hosts:
+        return
+    if rule.allow_groups:
+        found = zapi.host.get(hostids=[hostid], output=['hostid', 'host'],
+                              selectGroups=['name'])
+        groups = set(g['name'] for h in found for g in h.get('groups') or [])
+        if groups.intersection(rule.allow_groups):
+            return
+    raise Refused('host %r is not in the allow list of rule %s'
+                  % (host, rule.name))
+
+
+def _execute(zapi, rule, hostid):
+    """Run the rule's script on ``hostid``; return ``(ok, output)``."""
     scripts = zapi.script.get(filter={'name': rule.script},
                               output=['scriptid', 'name'])
-    if not scripts:
-        return False, 'global script %r does not exist' % rule.script
-    hostid = _hostid(zapi, host)
-    if hostid is None:
-        return False, 'host %r does not exist in Zabbix' % host
+    if len(scripts) != 1:
+        return False, ('expected one global script named %r, found %d'
+                       % (rule.script, len(scripts)))
     reply = zapi.script.execute(scriptid=scripts[0]['scriptid'],
                                 hostid=hostid)
     output = reply.get('value') or ''
@@ -173,26 +276,43 @@ def _execute(zapi, rule, host):
     return True, output
 
 
+def _refuse(conn, event_id, rule, host, reason):
+    output = 'refused: %s' % reason
+    record(conn, event_id, rule, host, False, output, ran=False)
+    log.warning('remediation %s for %s %s', rule.name, host, output)
+    return result(rule, host, False, False, output)
+
+
 def remediate(zapi, conn, event, rules, event_id, now=None):
     """Run the matching rule's script for ``event`` (stored as row
-    ``event_id`` in ``events``).  Returns None when no rule matches, or a
-    dict ``{rule, script, host, ran, ok, output}``."""
+    ``event_id`` in ``events``) once Zabbix confirms it.  Returns None when
+    no enabled rule matches, or a dict ``{rule, script, host, ran, ok,
+    output}``."""
     rule = match(rules, event)
     if rule is None:
         return None
     now = now or datetime.datetime.now(UTC)
-    if in_cooldown(conn, event.host, rule, now):
-        return result(rule, event.host, False, None,
-                      'skipped: %s ran for %s within the last %d s cooldown'
-                      % (rule.name, event.host, rule.cooldown_seconds))
     try:
-        ok, output = _execute(zapi, rule, event.host)
+        hostid, host = _confirm(zapi, event, rule)
+        _check_allowed(zapi, rule, hostid, host)
+    except Refused as exc:
+        return _refuse(conn, event_id, rule, event.host, str(exc))
+    except Exception as exc:  # API errors, timeouts, refused connections
+        return _refuse(conn, event_id, rule, event.host,
+                       'cannot confirm the event with Zabbix: %s: %s'
+                       % (type(exc).__name__, exc))
+    if in_cooldown(conn, host, rule, now):
+        return _refuse(conn, event_id, rule, host,
+                       'rate-limited: %s ran for %s within the last %d s'
+                       % (rule.name, host, rule.cooldown_seconds))
+    try:
+        ok, output = _execute(zapi, rule, hostid)
     except Exception as exc:  # API errors, timeouts, refused connections
         ok, output = False, '%s: %s' % (type(exc).__name__, exc)
-    record(conn, event_id, rule, event.host, ok, output)
+    record(conn, event_id, rule, host, ok, output, ran=True)
     if ok:
-        log.info('remediation %s on %s succeeded', rule.name, event.host)
+        log.info('remediation %s on %s succeeded', rule.name, host)
     else:
-        log.warning('remediation %s on %s failed: %s', rule.name,
-                    event.host, output)
-    return result(rule, event.host, True, ok, output)
+        log.warning('remediation %s on %s failed: %s', rule.name, host,
+                    output)
+    return result(rule, host, True, ok, output)

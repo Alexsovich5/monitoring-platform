@@ -11,7 +11,7 @@ import requests
 
 from monplat import db
 
-from .conftest import STOCK_HOST, wait_for
+from .conftest import STOCK_HOST, intake_headers, wait_for
 
 pytestmark = pytest.mark.integration
 
@@ -31,15 +31,15 @@ def _write_blob(size):
     os.chmod(BLOB, 0o666)
 
 
-def _remediations(cfg, ok):
+def _remediations(cfg, ok, ran=True):
     conn = db.connect(cfg, 'monplat')
     try:
         cursor = conn.cursor()
         cursor.execute('SELECT r.rule, r.script_name, r.output, e.trigger_name'
                        ' FROM remediations r JOIN events e'
                        ' ON e.id = r.event_id'
-                       ' WHERE r.host = %s AND r.ok = %s'
-                       ' ORDER BY r.id', (STOCK_HOST, ok))
+                       ' WHERE r.host = %s AND r.ok = %s AND r.ran = %s'
+                       ' ORDER BY r.id', (STOCK_HOST, ok, ran))
         rows = cursor.fetchall()
         cursor.close()
     finally:
@@ -64,6 +64,7 @@ def test_global_script_runs_on_the_agent(zapi):
     assert len(found) == 1
     script = found[0]
     assert script['execute_on'] == '0'
+    assert script['host_access'] == '3'
     assert script['command'] == ('rm -f /var/spool/mp-demo/* '
                                  '&& echo cleared')
 
@@ -75,6 +76,35 @@ def test_spool_template_is_linked_to_the_zabbix_server_host(zapi):
     assert TEMPLATE in linked
     # Linked with host.massadd, so the stock template stays linked too.
     assert 'Template OS Linux' in linked
+
+
+FORGED_TRIGGER = 'Spool directory too large (forged) on %s' % STOCK_HOST
+
+
+def test_forged_event_runs_no_script_and_is_audited(cfg, zapi):
+    """A well-formed, authenticated notification for a real host whose
+    event does not exist in Zabbix is refused before script.execute."""
+    marker = os.path.join(SPOOL, 'forged-marker')
+    with open(marker, 'w') as handle:
+        handle.write('still here')
+    os.chmod(marker, 0o666)
+    body = '\n'.join([
+        'eventid=987654321', 'status=PROBLEM', 'host=%s' % STOCK_HOST,
+        'trigger_id=1', 'trigger_name=%s' % FORGED_TRIGGER, 'severity=5',
+        'time=2014.12.18 12:00:00', 'value=10485760'])
+    response = requests.post(cfg['api']['url'] + '/api/v1/events',
+                             data={'subject': 'PROBLEM', 'body': body},
+                             headers=intake_headers(cfg), timeout=60)
+    assert response.status_code == 201
+    outcome = response.json()['remediation']
+    assert outcome['ran'] is False
+    assert 'not found in Zabbix' in outcome['output']
+    assert os.path.exists(marker)
+    refused = [row for row in _remediations(cfg, False, ran=False)
+               if row[3] == FORGED_TRIGGER]
+    assert len(refused) == 1
+    assert refused[0][2].startswith('refused: ')
+    os.remove(marker)
 
 
 def test_large_spool_file_is_removed_by_remediation(cfg, zapi):

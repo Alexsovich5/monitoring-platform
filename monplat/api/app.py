@@ -1,9 +1,13 @@
 """Flask application serving hosts, items and item history as JSON, the
 Graphite find and render endpoints from ``monplat.api.graphite``, and the
 event log that the Zabbix alertscript posts to.  Each new event is pushed
-once through ``monplat.notify``, and a PROBLEM event that matches a rule in
-``config/remediation.yml`` runs that rule's Zabbix global script through
-``monplat.remediation``.
+once through ``monplat.notify``, and a PROBLEM event that matches an
+enabled remediation rule is handed to ``monplat.remediation``, which
+confirms it with Zabbix before running the rule's global script.
+
+``POST /api/v1/events`` is the only endpoint that changes state.  It needs
+the intake token (``monplat.intake``) in the ``X-Monplat-Token`` header and
+answers 401 without it; the read-only endpoints are open, for Grafana.
 
 Hosts, items and history are read straight from the Zabbix PostgreSQL
 database; events are stored in the ``monplat`` database.
@@ -19,7 +23,8 @@ import requests
 from flask import Flask, Response, current_app, request
 from pyzabbix import ZabbixAPIException
 
-from monplat import config, db, events, history, notify, remediation
+from monplat import (config, db, events, history, intake, notify,
+                     remediation)
 from monplat.api import graphite
 from monplat.templates import SpecError
 from monplat.timeparse import TimeParseError, parse_time
@@ -33,6 +38,8 @@ MONITORED = 0
 # hosts.flags: 0 = plain host, 4 = discovered host. Host prototypes (2)
 # are templates for discovery, not hosts, and are left out.
 HOST_FLAGS = (0, 4)
+# Requests above this size are refused with 413 before they are parsed.
+MAX_CONTENT_LENGTH = 64 * 1024
 
 
 log = logging.getLogger(__name__)
@@ -44,6 +51,14 @@ class BadRequest(Exception):
 
 class NotFound(Exception):
     status = 404
+
+
+class Unauthorized(Exception):
+    status = 401
+
+
+class Unavailable(Exception):
+    status = 503
 
 
 def json_response(data, status=200):
@@ -201,7 +216,24 @@ def render():
     return json_response(series)
 
 
+def _check_intake_token():
+    cfg = current_app.config['MONPLAT']
+    path = intake.token_path(cfg)
+    try:
+        expected = intake.read_token(path)
+    except IOError as exc:
+        log.error('cannot read intake token file %s: %s', path, exc)
+        expected = None
+    if not expected:
+        log.error('event intake refused: no token in %s', path)
+        raise Unavailable('event intake is not configured; run '
+                          '"mpctl provision"')
+    if not intake.matches(expected, request.headers.get(intake.HEADER)):
+        raise Unauthorized('missing or wrong %s header' % intake.HEADER)
+
+
 def post_event():
+    _check_intake_token()
     data = request.get_json(silent=True)
     if not isinstance(data, dict):
         data = request.form
@@ -223,10 +255,12 @@ def post_event():
 
 
 def _remediate(conn, event, event_id):
-    """Run the remediation rule matching ``event``, if any.  Zabbix is only
-    contacted when a rule matches."""
+    """Hand ``event`` to the enabled remediation rule matching it, if any.
+    Zabbix is only contacted when a rule matches; ``remediation`` then
+    checks the event against Zabbix before anything runs."""
+    cfg = current_app.config['MONPLAT']
     try:
-        rules = remediation.load_rules(remediation.DEFAULT_PATH)
+        rules = remediation.load_rules(remediation.rules_path(cfg))
     except SpecError as exc:
         log.error('remediation rules not loaded: %s', exc)
         return None
@@ -234,16 +268,13 @@ def _remediate(conn, event, event_id):
     if rule is None:
         return None
     try:
-        zapi = zabbix_api.connect(current_app.config['MONPLAT'], retries=1)
+        zapi = zabbix_api.connect(cfg, retries=1)
     except (zabbix_api.ZabbixUnavailable, ZabbixAPIException,
             requests.RequestException) as exc:
-        now = datetime.datetime.now(events.UTC)
-        if remediation.in_cooldown(conn, event.host, rule, now):
-            return remediation.result(rule, event.host, False, None,
-                                      'skipped: cooldown')
-        output = 'Zabbix API login failed: %s' % exc
-        remediation.record(conn, event_id, rule, event.host, False, output)
-        return remediation.result(rule, event.host, True, False, output)
+        output = 'refused: Zabbix API login failed: %s' % exc
+        remediation.record(conn, event_id, rule, event.host, False, output,
+                           ran=False)
+        return remediation.result(rule, event.host, False, False, output)
     return remediation.remediate(zapi, conn, event, rules,
                                  event_id=event_id)
 
@@ -277,6 +308,11 @@ def _not_found(exc):
                          404)
 
 
+def _too_large(exc):
+    return json_response({'error': 'request larger than %d bytes'
+                                   % MAX_CONTENT_LENGTH}, 413)
+
+
 def _allow_any_origin(response):
     response.headers['Access-Control-Allow-Origin'] = '*'
     return response
@@ -286,6 +322,7 @@ def create_app(cfg=None):
     """Build the API application; ``cfg`` defaults to ``config.load()``."""
     app = Flask(__name__)
     app.config['MONPLAT'] = config.load() if cfg is None else cfg
+    app.config['MAX_CONTENT_LENGTH'] = MAX_CONTENT_LENGTH
     app.add_url_rule('/api/v1/health', 'health', health)
     app.add_url_rule('/api/v1/hosts', 'hosts', hosts)
     app.add_url_rule('/api/v1/hosts/<host>/items', 'host_items', host_items)
@@ -299,6 +336,9 @@ def create_app(cfg=None):
     app.add_url_rule('/render', 'render', render, methods=['GET', 'POST'])
     app.register_error_handler(BadRequest, _error)
     app.register_error_handler(NotFound, _error)
+    app.register_error_handler(Unauthorized, _error)
+    app.register_error_handler(Unavailable, _error)
+    app.register_error_handler(413, _too_large)
     app.register_error_handler(404, _not_found)
     app.after_request(_allow_any_origin)
     return app

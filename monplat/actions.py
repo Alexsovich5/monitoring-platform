@@ -21,6 +21,8 @@ OPERATION_SEND_MESSAGE = 0
 STATUS_ENABLED = 0
 SCRIPT_TYPE_CUSTOM = 0
 EXECUTE_ON_AGENT = 0
+# Only users with write access to a host may run the script on it.
+HOST_ACCESS_WRITE = 3
 
 _SECTIONS = {
     'media_type': ('description', 'type', 'exec_path'),
@@ -181,17 +183,21 @@ def plan(zapi, spec):
 
 
 def plan_scripts(zapi, rules):
-    """Return one change per global script named by the remediation
-    ``rules``: a custom script run on the agent with the rule's command."""
+    """Return one change per global script named by the enabled
+    remediation ``rules``: a custom script run on the agent with the rule's
+    command.  Disabled rules get no script."""
     changes = []
     seen = set()
     for rule in rules:
+        if not rule.enabled:
+            continue
         name = rule.script
         if name in seen:
             continue
         seen.add(name)
         desired = {'command': rule.command, 'type': SCRIPT_TYPE_CUSTOM,
-                   'execute_on': EXECUTE_ON_AGENT}
+                   'execute_on': EXECUTE_ON_AGENT,
+                   'host_access': HOST_ACCESS_WRITE}
         found = zapi.script.get(filter={'name': name}, output='extend')
         if not found:
             params = dict(desired, name=name)

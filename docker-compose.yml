@@ -8,7 +8,11 @@ services:
       - .:/app
       # Lets the integration tests write the file that remediation removes.
       - mp-demo-spool:/var/spool/mp-demo
+      # "mpctl provision" writes the alert intake token here.
+      - monplat-secrets:/var/lib/monplat/secrets
     working_dir: /app
+    environment:
+      - MONPLAT_REMEDIATION_RULES_FILE
     depends_on:
       - db
       - zabbix
@@ -52,12 +56,15 @@ services:
               "monplat.api.app:create_app()"]
     volumes:
       - .:/app
+      - monplat-secrets:/var/lib/monplat/secrets:ro
     working_dir: /app
+    environment:
+      - MONPLAT_REMEDIATION_RULES_FILE
     restart: unless-stopped
     depends_on:
       - db
     ports:
-      - "20750:5000"
+      - "127.0.0.1:20750:5000"
 
   pushover-stub:
     image: monitoring-platform:app
@@ -77,7 +84,7 @@ services:
       - ./grafana/dashboards:/grafana/src/app/dashboards:ro
     restart: unless-stopped
     ports:
-      - "20730:3000"
+      - "127.0.0.1:20730:3000"
 
   db:
     image: postgres:9.3
@@ -96,13 +103,16 @@ services:
       - db
     volumes:
       - mp-demo-spool:/var/spool/mp-demo
+      # The alertscript reads the intake token from here.
+      - monplat-secrets:/var/lib/monplat/secrets
     ports:
-      - "20780:80"
-      - "20751:10051"
+      - "127.0.0.1:20780:80"
+      - "127.0.0.1:20751:10051"
 
 volumes:
   dbdata:
   mp-demo-spool:
+  monplat-secrets:
 
 networks:
   default:

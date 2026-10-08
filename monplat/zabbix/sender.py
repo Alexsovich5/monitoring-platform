@@ -10,6 +10,11 @@ A request is the 5-byte header ``ZBXD\\x01``, the payload length as an
 The server answers with a frame of the same shape whose JSON ``info``
 string summarises the result, e.g.
 ``processed: 2; failed: 1; total: 3; seconds spent: 0.000100``.
+
+The reply is read with limits: a declared length above ``MAX_RESPONSE``
+is refused before any of the body is read, and ``send()``'s ``timeout``
+is one deadline for the whole exchange (connect, send and every read), so
+a peer that trickles bytes cannot keep the caller waiting.
 """
 import json
 import re
@@ -20,6 +25,9 @@ import time
 HEADER = b'ZBXD\x01'
 _LENGTH = struct.Struct('<Q')
 _PREFIX_SIZE = len(HEADER) + _LENGTH.size
+# Trapper replies are a short JSON summary (well under 1 KiB).
+MAX_RESPONSE = 64 * 1024
+_CHUNK = 4096
 _INFO_RE = re.compile(
     r'processed:?\s*(\d+);\s*failed:?\s*(\d+);\s*total:?\s*(\d+);'
     r'\s*seconds spent:?\s*([0-9.]+)')
@@ -86,35 +94,49 @@ def decode_response(raw):
     }
 
 
-def _recv_frame(sock):
-    data = b''
-    expected = None
-    while True:
-        chunk = sock.recv(4096)
+def _read(sock, size, deadline):
+    """Read up to ``size`` bytes, stopping early only at end of stream.
+    Raises ``SenderError`` once ``deadline`` (epoch seconds) has passed."""
+    buf = bytearray()
+    while len(buf) < size:
+        remaining = deadline - time.time()
+        if remaining <= 0:
+            raise SenderError('no complete response within the timeout '
+                              '(%d of %d bytes received)' % (len(buf), size))
+        sock.settimeout(remaining)
+        chunk = sock.recv(min(_CHUNK, size - len(buf)))
         if not chunk:
             break
-        data += chunk
-        if expected is None and len(data) >= _PREFIX_SIZE:
-            if data[:len(HEADER)] != HEADER:
-                break
-            expected = _PREFIX_SIZE + _LENGTH.unpack(
-                data[len(HEADER):_PREFIX_SIZE])[0]
-        if expected is not None and len(data) >= expected:
-            break
-    return data
+        buf.extend(chunk)
+    return bytes(buf)
+
+
+def _recv_frame(sock, deadline):
+    """Read one ZBXD frame of at most ``MAX_RESPONSE`` body bytes."""
+    prefix = _read(sock, _PREFIX_SIZE, deadline)
+    if len(prefix) < _PREFIX_SIZE or prefix[:len(HEADER)] != HEADER:
+        return prefix
+    length = _LENGTH.unpack(prefix[len(HEADER):])[0]
+    if length > MAX_RESPONSE:
+        raise SenderError('response declares %d bytes, more than the %d '
+                          'byte limit' % (length, MAX_RESPONSE))
+    return prefix + _read(sock, length, deadline)
 
 
 def send(server, port, data, timeout=10.0):
     """Send ``(host, key, value, clock)`` tuples to the trapper at
-    ``server:port`` and return ``{'processed', 'failed', 'total'}``."""
+    ``server:port`` and return ``{'processed', 'failed', 'total'}``.
+    ``timeout`` bounds the whole exchange, not each socket call."""
     frame = encode(data)
+    deadline = time.time() + timeout
     try:
         sock = socket.create_connection((server, int(port)), timeout)
     except (socket.error, socket.timeout) as exc:
         raise SenderError('cannot connect to %s:%s: %s' % (server, port, exc))
     try:
+        sock.settimeout(max(deadline - time.time(), 0.001))
         sock.sendall(frame)
-        raw = _recv_frame(sock)
+        raw = _recv_frame(sock, deadline)
     except (socket.error, socket.timeout) as exc:
         raise SenderError('error talking to %s:%s: %s' % (server, port, exc))
     finally:
