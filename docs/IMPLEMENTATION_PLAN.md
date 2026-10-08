@@ -33,7 +33,7 @@ Conventions used in every task:
 - **Files:**
   - create `Dockerfile` (`FROM python:2.7.13`; **no `apt-get`**: the jessie indexes are 404 now, and gcc, git and `libpq-dev` already come from the `buildpack-deps` layers; `pip install -r requirements.txt -r requirements-dev.txt`; `ENTRYPOINT ["docker/app/entrypoint.sh"]`, no `pip install -e .` at build time because the bind mount would hide its egg-info)
   - create `docker/app/entrypoint.sh` (`cd /app && python setup.py -q develop --no-deps >/dev/null && exec "$@"`, so the `mpctl` console script and `monplat.egg-info` exist in the mounted tree in every container)
-  - create `docker-compose.yml` (Compose-spec file with a `services:` key and no `version` key, since current `docker compose` rejects the legacy v1 format; service `app` only, repo bind-mounted at `/app`)
+  - create `docker-compose.yml` (Compose-spec file with a `services:` key and no `version` key, since current `docker compose` rejects the legacy v1 format; service `app` only (image `monitoring-platform:app`), repo bind-mounted at `/app`; top-level `name: monitoring-platform` and a default network pinned to subnet `172.47.0.0/24` so the project stays in its own address range on a shared Docker host; any host ports published by later tasks are taken from 20700–20799)
   - create `Makefile` (`build`, `unit`, `test: unit`, `down`, `shell`)
   - create `requirements.txt`: Flask 0.10.1, Werkzeug 0.9.6, Jinja2 2.7.3, MarkupSafe 0.23, itsdangerous 0.24, gunicorn 19.1.1, requests 2.5.1, pyzabbix 0.7.2, psycopg2 2.5.4, psutil 2.1.3, PyYAML 3.11, pysnmp 4.2.5, pyasn1 0.1.7 (all `==`)
   - create `requirements-dev.txt`: pytest 2.6.4, py 1.4.26, mock 1.0.1, snmpsim 0.2.4

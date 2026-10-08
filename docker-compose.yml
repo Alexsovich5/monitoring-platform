@@ -1,0 +1,15 @@
+name: monitoring-platform
+
+services:
+  app:
+    build: .
+    image: monitoring-platform:app
+    volumes:
+      - .:/app
+    working_dir: /app
+
+networks:
+  default:
+    ipam:
+      config:
+        - subnet: 172.47.0.0/24
