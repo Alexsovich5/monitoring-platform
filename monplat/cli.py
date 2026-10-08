@@ -45,6 +45,16 @@ def build_parser():
                          help='Zabbix host the values belong to '
                               '(default: mp-collector)')
     collect.set_defaults(func=cmd_collect)
+
+    dash = commands.add_parser(
+        'dashboards', help='generate Grafana dashboards from the template '
+                           'specs')
+    dash.add_argument('--templates', metavar='DIR', default=None,
+                      help='template spec directory '
+                           '(default: config/templates)')
+    dash.add_argument('--out', metavar='DIR', default=None,
+                      help='output directory (default: grafana/dashboards)')
+    dash.set_defaults(func=cmd_dashboards)
     return parser
 
 
@@ -130,6 +140,31 @@ def cmd_collect(args):
     print('processed: %(processed)d; failed: %(failed)d; total: %(total)d'
           % result)
     return 0 if result['failed'] == 0 else 1
+
+
+def cmd_dashboards(args):
+    from monplat import dashboards, templates
+
+    directory = args.templates or templates.DEFAULT_DIR
+    try:
+        specs = templates.load_specs(directory)
+        for spec in specs:
+            templates.validate(spec)
+    except templates.SpecError as exc:
+        sys.stderr.write('mpctl dashboards: %s\n' % exc)
+        return 2
+    if not specs:
+        sys.stderr.write('mpctl dashboards: no *.yml specs in %s\n'
+                         % directory)
+        return 2
+    try:
+        written = dashboards.write(specs, args.out or dashboards.DEFAULT_DIR)
+    except (IOError, OSError) as exc:
+        sys.stderr.write('mpctl dashboards: %s\n' % exc)
+        return 1
+    for path in written:
+        print('wrote %s' % path)
+    return 0
 
 
 def main(argv=None):

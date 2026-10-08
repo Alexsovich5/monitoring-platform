@@ -126,7 +126,7 @@ Data flow:
    remediation rule → `script.execute` → row in `monplat.remediations`.
 4. `forecast` reads history (SQL) → computes hours-to-threshold → sends a
    trapper value → forecast trigger.
-5. Browser → Grafana 1.9.1 → Graphite datasource `http://localhost:5000` →
+5. Browser → Grafana 1.9.1 → Graphite datasource `http://localhost:20750` (the api's host port) →
    `/metrics/find`, `/render` → SQL over Zabbix history.
 
 ## Data model & interfaces

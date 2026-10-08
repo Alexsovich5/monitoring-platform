@@ -46,6 +46,16 @@ services:
     ports:
       - "20750:5000"
 
+  grafana:
+    build: docker/grafana
+    image: monitoring-platform:grafana
+    platform: linux/amd64
+    volumes:
+      - ./grafana/dashboards:/grafana/src/app/dashboards:ro
+    restart: unless-stopped
+    ports:
+      - "20730:3000"
+
   db:
     image: postgres:9.3
     environment:

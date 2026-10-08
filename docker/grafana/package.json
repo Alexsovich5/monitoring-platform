@@ -1,0 +1,12 @@
+{
+  "name": "monplat-grafana-css",
+  "version": "0.1.0",
+  "private": true,
+  "description": "LESS toolchain used to compile Grafana 1.9.1's stylesheets",
+  "dependencies": {
+    "less": "1.4.2",
+    "ycssmin": "1.0.1",
+    "mkdirp": "0.3.5",
+    "mime": "1.2.11"
+  }
+}
