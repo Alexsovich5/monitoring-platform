@@ -7,6 +7,30 @@ services:
     volumes:
       - .:/app
     working_dir: /app
+    depends_on:
+      - db
+      - zabbix
+
+  db:
+    image: postgres:9.3
+    environment:
+      POSTGRES_PASSWORD: postgres
+    volumes:
+      - ./docker/db/init:/docker-entrypoint-initdb.d:ro
+      - dbdata:/var/lib/postgresql/data
+
+  zabbix:
+    build: docker/zabbix
+    image: monitoring-platform:zabbix
+    platform: linux/amd64
+    depends_on:
+      - db
+    ports:
+      - "20780:80"
+      - "20751:10051"
+
+volumes:
+  dbdata:
 
 networks:
   default:
