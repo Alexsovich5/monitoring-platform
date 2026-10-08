@@ -32,6 +32,19 @@ def build_parser():
                            help='print the planned changes without '
                                 'applying them')
     provision.set_defaults(func=cmd_provision)
+
+    collect = commands.add_parser(
+        'collect', help='sample host metrics with psutil and send them to '
+                        'Zabbix trapper items')
+    mode = collect.add_mutually_exclusive_group()
+    mode.add_argument('--once', action='store_true',
+                      help='send one batch and exit')
+    mode.add_argument('--interval', metavar='SECONDS', type=int, default=30,
+                      help='seconds between batches (default: 30)')
+    collect.add_argument('--host', metavar='NAME', default=None,
+                         help='Zabbix host the values belong to '
+                              '(default: mp-collector)')
+    collect.set_defaults(func=cmd_collect)
     return parser
 
 
@@ -94,6 +107,29 @@ def cmd_provision(args):
           % ('dry run, nothing applied: ' if args.dry_run else '',
              totals['create'], totals['update'], totals['unchanged']))
     return 0
+
+
+def cmd_collect(args):
+    from monplat import collector, config, templates
+    from monplat.zabbix import sender
+
+    try:
+        cfg = config.load()
+        keys = collector.template_keys()
+    except (config.ConfigError, templates.SpecError) as exc:
+        sys.stderr.write('mpctl collect: %s\n' % exc)
+        return 2 if isinstance(exc, templates.SpecError) else 1
+    try:
+        result = collector.run(cfg, once=args.once, interval=args.interval,
+                               host=args.host, keys=keys)
+    except sender.SenderError as exc:
+        sys.stderr.write('mpctl collect: %s\n' % exc)
+        return 1
+    except KeyboardInterrupt:
+        return 0
+    print('processed: %(processed)d; failed: %(failed)d; total: %(total)d'
+          % result)
+    return 0 if result['failed'] == 0 else 1
 
 
 def main(argv=None):
