@@ -177,6 +177,37 @@ def test_problem_and_ok_for_one_eventid_are_two_rows():
     assert len(conn.rows) == 2
 
 
+# --- notification claim ----------------------------------------------------
+
+def _cursor_conn(fetchone):
+    conn = mock.MagicMock(name='conn')
+    conn.cursor.return_value.fetchone.return_value = fetchone
+    return conn
+
+
+def test_claim_notification_sets_notified_only_if_unset():
+    conn = _cursor_conn((7,))
+    assert events.claim_notification(conn, 7) is True
+    sql, params = conn.cursor.return_value.execute.call_args[0]
+    assert sql.startswith('UPDATE events SET notified = true')
+    assert 'NOT notified' in sql
+    assert params == (7,)
+    assert conn.commit.called
+
+
+def test_claim_notification_is_false_when_already_notified():
+    assert events.claim_notification(_cursor_conn(None), 7) is False
+
+
+def test_release_notification_clears_the_flag():
+    conn = _cursor_conn(None)
+    events.release_notification(conn, 7)
+    sql, params = conn.cursor.return_value.execute.call_args[0]
+    assert sql.startswith('UPDATE events SET notified = false')
+    assert params == (7,)
+    assert conn.commit.called
+
+
 # --- HTTP API ---------------------------------------------------------------
 
 @pytest.yield_fixture
@@ -192,13 +223,32 @@ def _json(response):
     return json.loads(response.data.decode('utf-8'))
 
 
-def test_post_event_from_form_stores_it(client):
+@pytest.yield_fixture
+def push():
+    with mock.patch('monplat.api.app.notify.push', return_value=True) as push:
+        yield push
+
+
+@pytest.yield_fixture
+def claim():
+    with mock.patch('monplat.api.app.events.claim_notification',
+                    return_value=True) as claim:
+        yield claim
+
+
+@pytest.yield_fixture
+def release():
+    with mock.patch('monplat.api.app.events.release_notification') as rel:
+        yield rel
+
+
+def test_post_event_from_form_stores_it(client, push, claim, release):
     http, connect = client
     with mock.patch('monplat.api.app.events.store', return_value=7) as store:
         response = http.post('/api/v1/events',
                              data={'subject': SUBJECT, 'body': BODY})
     assert response.status_code == 201
-    assert _json(response) == {'id': 7, 'notified': False,
+    assert _json(response) == {'id': 7, 'notified': True,
                                'remediation': None}
     assert connect.call_args[0][1] == 'monplat'
     stored = store.call_args[0][1]
@@ -206,7 +256,7 @@ def test_post_event_from_form_stores_it(client):
         (1234, 'PROBLEM', 4)
 
 
-def test_post_event_accepts_json(client):
+def test_post_event_accepts_json(client, push, claim, release):
     http, _ = client
     with mock.patch('monplat.api.app.events.store', return_value=8):
         response = http.post('/api/v1/events',
@@ -217,7 +267,7 @@ def test_post_event_accepts_json(client):
     assert _json(response)['id'] == 8
 
 
-def test_post_event_without_eventid_is_400(client):
+def test_post_event_without_eventid_is_400(client, push):
     http, _ = client
     with mock.patch('monplat.api.app.events.store') as store:
         response = http.post('/api/v1/events',
@@ -226,6 +276,45 @@ def test_post_event_without_eventid_is_400(client):
     assert response.status_code == 400
     assert 'eventid' in _json(response)['error']
     assert not store.called
+    assert not push.called
+
+
+def test_post_event_pushes_the_parsed_event_once_claimed(client, push, claim,
+                                                         release):
+    http, connect = client
+    with mock.patch('monplat.api.app.events.store', return_value=7):
+        http.post('/api/v1/events', data={'subject': SUBJECT, 'body': BODY})
+    assert claim.call_args[0][1] == 7
+    cfg, event = push.call_args[0]
+    assert cfg is CFG
+    assert (event.eventid, event.status, event.trigger_name) == \
+        (1234, 'PROBLEM', 'High CPU on mp-test-alert')
+    assert not release.called
+
+
+def test_failed_push_releases_the_claim_and_reports_not_notified(
+        client, push, claim, release):
+    http, _ = client
+    push.return_value = False
+    with mock.patch('monplat.api.app.events.store', return_value=7):
+        response = http.post('/api/v1/events',
+                             data={'subject': SUBJECT, 'body': BODY})
+    assert response.status_code == 201
+    assert _json(response)['notified'] is False
+    assert release.call_args[0][1] == 7
+
+
+def test_already_notified_event_is_not_pushed_again(client, push, claim,
+                                                    release):
+    http, _ = client
+    claim.return_value = False
+    with mock.patch('monplat.api.app.events.store', return_value=7):
+        response = http.post('/api/v1/events',
+                             data={'subject': SUBJECT, 'body': BODY})
+    assert response.status_code == 201
+    assert _json(response)['notified'] is True
+    assert not push.called
+    assert not release.called
 
 
 def test_post_event_without_body_is_400(client):

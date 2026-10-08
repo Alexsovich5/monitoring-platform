@@ -1,5 +1,6 @@
 """A breaching trapper value goes through a Zabbix trigger and action,
-``mp_alert.py`` and ``POST /api/v1/events`` into ``monplat.events``."""
+``mp_alert.py`` and ``POST /api/v1/events`` into ``monplat.events``, and
+on to the Pushover stub."""
 import time
 
 import pytest
@@ -28,6 +29,18 @@ def _events(cfg, status):
         return []
     return [e for e in response.json()
             if e['trigger_name'].startswith(TRIGGER_PREFIX)]
+
+
+def _stub_url(cfg):
+    url = cfg['notify']['pushover_url']
+    return url[:-len('/1/messages.json')] + '/_received'
+
+
+def _pushes(cfg, status):
+    response = requests.get(_stub_url(cfg), timeout=10)
+    response.raise_for_status()
+    title = '%s: High CPU on %s' % (status, HOST)
+    return [m for m in response.json() if m['title'] == title]
 
 
 def test_provisioned_action_and_media(zapi):
@@ -69,6 +82,7 @@ def test_store_keeps_one_row_per_eventid_and_status(cfg):
 
 
 def test_high_cpu_problem_and_recovery_are_recorded(cfg, test_hosts):
+    requests.delete(_stub_url(cfg), timeout=10).raise_for_status()
     send_until_processed(cfg, [(HOST, CPU_KEY, 99, None)])
     problems = wait_for(lambda: _events(cfg, 'PROBLEM'), TIMEOUT,
                         message='PROBLEM event for %s recorded' % HOST)
@@ -77,6 +91,10 @@ def test_high_cpu_problem_and_recovery_are_recorded(cfg, test_hosts):
     assert problem['host'] == HOST
     assert problem['severity'] == 4
     assert problem['trigger_name'] == 'High CPU on %s' % HOST
+    assert problem['notified'] is True
+    pushed = _pushes(cfg, 'PROBLEM')
+    assert len(pushed) == 1
+    assert pushed[0]['priority'] == 1
 
     # avg(5m) of 99 and 5 is 52, below the trigger's 90.
     send_until_processed(cfg, [(HOST, CPU_KEY, 5, None)])
@@ -88,3 +106,6 @@ def test_high_cpu_problem_and_recovery_are_recorded(cfg, test_hosts):
     assert len(oks) == 1
     assert oks[0]['eventid'] == problem['eventid']
     assert len(_events(cfg, 'PROBLEM')) == 1
+    assert oks[0]['notified'] is True
+    assert len(_pushes(cfg, 'PROBLEM')) == 1
+    assert len(_pushes(cfg, 'OK')) == 1

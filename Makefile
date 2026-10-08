@@ -1,4 +1,4 @@
-STACK = db zabbix snmpsim api grafana
+STACK = db zabbix snmpsim api pushover-stub grafana
 
 GRAFANA_VENDOR = docker/grafana/vendor
 CURL = curl -fsSL --retry 3 --retry-delay 5

@@ -1,6 +1,7 @@
 """Flask application serving hosts, items and item history as JSON, the
 Graphite find and render endpoints from ``monplat.api.graphite``, and the
-event log that the Zabbix alertscript posts to.
+event log that the Zabbix alertscript posts to.  Each new event is pushed
+once through ``monplat.notify``.
 
 Hosts, items and history are read straight from the Zabbix PostgreSQL
 database; events are stored in the ``monplat`` database.
@@ -12,7 +13,7 @@ import time
 import psycopg2
 from flask import Flask, Response, current_app, request
 
-from monplat import config, db, events, history
+from monplat import config, db, events, history, notify
 from monplat.api import graphite
 from monplat.timeparse import TimeParseError, parse_time
 
@@ -200,7 +201,12 @@ def post_event():
         raise BadRequest(str(exc))
     with connection('monplat') as conn:
         event_id = events.store(conn, event)
-    return json_response({'id': event_id, 'notified': False,
+        notified = True
+        if events.claim_notification(conn, event_id):
+            notified = notify.push(current_app.config['MONPLAT'], event)
+            if not notified:
+                events.release_notification(conn, event_id)
+    return json_response({'id': event_id, 'notified': notified,
                           'remediation': None}, 201)
 
 

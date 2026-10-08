@@ -46,6 +46,16 @@ services:
     ports:
       - "20750:5000"
 
+  pushover-stub:
+    image: monitoring-platform:app
+    # One worker: the stub keeps received messages in process memory.
+    command: ["gunicorn", "-b", "0.0.0.0:8025", "-w", "1",
+              "tests.stubs.pushover_stub:create_app()"]
+    volumes:
+      - .:/app
+    working_dir: /app
+    restart: unless-stopped
+
   grafana:
     build: docker/grafana
     image: monitoring-platform:grafana

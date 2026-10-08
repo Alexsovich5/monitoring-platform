@@ -134,6 +134,33 @@ def store(conn, event):
     return row[0]
 
 
+def _update_notified(conn, sql, event_id):
+    cursor = conn.cursor()
+    try:
+        cursor.execute(sql, (event_id,))
+        row = cursor.fetchone()
+        conn.commit()
+    finally:
+        cursor.close()
+    return row
+
+
+def claim_notification(conn, event_id):
+    """Mark event ``event_id`` as notified if it is not already.  Return
+    True only for the caller that flipped the flag, so a repeated POST of
+    one notification is pushed once."""
+    row = _update_notified(conn, 'UPDATE events SET notified = true '
+                                 'WHERE id = %s AND NOT notified '
+                                 'RETURNING id', event_id)
+    return row is not None
+
+
+def release_notification(conn, event_id):
+    """Clear the notified flag after a push that failed."""
+    _update_notified(conn, 'UPDATE events SET notified = false '
+                           'WHERE id = %s RETURNING id', event_id)
+
+
 def recent(conn, host=None, status=None, limit=DEFAULT_LIMIT):
     """Return stored events as dicts, newest first."""
     where, params = [], []

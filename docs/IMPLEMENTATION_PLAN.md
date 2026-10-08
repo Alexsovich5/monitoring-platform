@@ -336,7 +336,8 @@ Conventions used in every task:
   - create `monplat/notify.py`
   - create `tests/stubs/__init__.py` and `tests/stubs/pushover_stub.py` (Flask: `POST /1/messages.json`, `GET /_received`, `DELETE /_received`)
   - modify `monplat/api/app.py` so that the events POST calls `notify.push` and sets `notified`
-  - modify `docker-compose.yml` to add `pushover-stub` (port 8025)
+  - modify `docker-compose.yml` to add `pushover-stub` (port 8025 on the compose network only; no host port), and add `pushover-stub` to `STACK` in the `Makefile`
+  - modify `monplat/events.py` to add `claim_notification`/`release_notification`, so a repeated POST of one notification is pushed once and a failed push leaves `notified` false
   - create `tests/unit/test_notify.py` and `tests/unit/test_pushover_stub.py`
   - modify `tests/integration/test_alert_chain.py`
 - **Tests first:**
