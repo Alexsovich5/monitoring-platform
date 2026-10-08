@@ -33,6 +33,19 @@ services:
     working_dir: /app
     restart: unless-stopped
 
+  api:
+    image: monitoring-platform:app
+    command: ["gunicorn", "-b", "0.0.0.0:5000", "-w", "2",
+              "monplat.api.app:create_app()"]
+    volumes:
+      - .:/app
+    working_dir: /app
+    restart: unless-stopped
+    depends_on:
+      - db
+    ports:
+      - "20750:5000"
+
   db:
     image: postgres:9.3
     environment:

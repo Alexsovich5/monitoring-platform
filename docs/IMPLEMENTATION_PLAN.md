@@ -229,7 +229,7 @@ Conventions used in every task:
 - **Files:**
   - create `monplat/api/__init__.py` and `monplat/api/app.py` (`create_app`, `/api/v1/health`, `/hosts`, `/hosts/<host>/items`, `/items/<id>/history`, CORS header)
   - create `monplat/timeparse.py` (`parse_time(s, now)`: `now`, epoch seconds, and `-<n><unit>` with Graphite units `s`, `min`, `h`, `d`, `w`, `mon` = 30 d, `y` = 365 d, plus bare `m` as minutes; Grafana 1.9.1's `translateTime` sends `-5min` and `-1mon`)
-  - modify `docker-compose.yml` to add the `api` service (`gunicorn -b 0.0.0.0:5000 -w 2 'monplat.api.app:create_app()'`, port 5000)
+  - modify `docker-compose.yml` to add the `api` service (`gunicorn -b 0.0.0.0:5000 -w 2 'monplat.api.app:create_app()'`, port 5000 on the compose network, published on host port `20750:5000` inside this project's 20700–20799 range); add `api` to the Makefile's `STACK` so `make integration` starts it
   - create `tests/unit/test_api.py` (Flask test client, history/db mocked), `tests/unit/test_timeparse.py` and `tests/integration/test_api_http.py`
 - **Tests first:**
   - unit: health returns 503 when a DB connect raises

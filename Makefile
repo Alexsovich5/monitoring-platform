@@ -1,4 +1,4 @@
-STACK = db zabbix snmpsim
+STACK = db zabbix snmpsim api
 
 build:
 	docker compose build app zabbix

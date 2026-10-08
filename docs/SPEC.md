@@ -264,7 +264,7 @@ spec or arguments are invalid.
 | Method & path | Description |
 |---|---|
 | `GET /api/v1/health` | `{"zabbix_db": true, "monplat_db": true}`; 503 if either DB is down |
-| `GET /api/v1/hosts` | `[{"hostid", "host"}]` of monitored hosts (status 0) |
+| `GET /api/v1/hosts` | `[{"hostid", "host"}]` of monitored hosts (status 0, host prototypes excluded) |
 | `GET /api/v1/hosts/<host>/items` | `[{"itemid", "key", "name", "units", "value_type"}]` |
 | `GET /api/v1/items/<itemid>/history?from=&until=&step=` | `[{"clock", "value"}]`. `from` and `until` take the forms `now`, epoch seconds, or `-<n><unit>`. `step` is in seconds. |
 | `POST /api/v1/events` | form or JSON `{subject, body}` from the alertscript → 201 `{"id": n, "notified": bool, "remediation": {...} or null}` |
