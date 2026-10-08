@@ -21,6 +21,18 @@ services:
     depends_on:
       - zabbix
 
+  snmpsim:
+    image: monitoring-platform:app
+    # snmpsim drops to nobody before binding, so it listens on UDP 1161.
+    command: ["snmpsimd.py", "--data-dir=/data",
+              "--agent-udpv4-endpoint=0.0.0.0:1161",
+              "--process-user=nobody", "--process-group=nogroup"]
+    volumes:
+      - .:/app
+      - ./docker/snmpsim/data:/data:ro
+    working_dir: /app
+    restart: unless-stopped
+
   db:
     image: postgres:9.3
     environment:

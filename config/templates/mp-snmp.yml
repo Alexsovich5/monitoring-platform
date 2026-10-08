@@ -1,0 +1,15 @@
+# A switch polled by Zabbix over SNMP v2c.  mp-switch-sim is the snmpsim
+# service, which answers for community "public" from
+# docker/snmpsim/data/public.snmprec.
+template: Template MP SNMP Device
+group: MP Templates
+applications: [System, Interfaces]
+items:
+  - {key: "sysUpTime", name: "Uptime (hundredths of a second)", type: snmpv2, value_type: unsigned, units: "", application: System, snmp_oid: "1.3.6.1.2.1.1.3.0", snmp_community: public, delay: 30}
+  - {key: "ifInOctets[1]", name: "Interface 1 octets in", type: snmpv2, value_type: unsigned, units: B, application: Interfaces, snmp_oid: "1.3.6.1.2.1.2.2.1.10.1", snmp_community: public, delay: 60}
+  - {key: "ifOutOctets[1]", name: "Interface 1 octets out", type: snmpv2, value_type: unsigned, units: B, application: Interfaces, snmp_oid: "1.3.6.1.2.1.2.2.1.16.1", snmp_community: public, delay: 60}
+  - {key: "ifInOctets[2]", name: "Interface 2 octets in", type: snmpv2, value_type: unsigned, units: B, application: Interfaces, snmp_oid: "1.3.6.1.2.1.2.2.1.10.2", snmp_community: public, delay: 60}
+  - {key: "ifOutOctets[2]", name: "Interface 2 octets out", type: snmpv2, value_type: unsigned, units: B, application: Interfaces, snmp_oid: "1.3.6.1.2.1.2.2.1.16.2", snmp_community: public, delay: 60}
+triggers: []
+hosts:
+  - {host: mp-switch-sim, groups: [MP Network], interfaces: [{type: snmp, dns: snmpsim, port: 1161}]}

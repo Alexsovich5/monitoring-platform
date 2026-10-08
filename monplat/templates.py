@@ -9,6 +9,9 @@ A spec file (``config/templates/*.yml``) describes one template::
     triggers: [{name, expression, severity}, ...]
     hosts:    [{host, groups: [...], interfaces: []}, ...]
 
+An ``snmpv2`` item also needs ``snmp_oid`` and ``snmp_community``.  A host
+polled over SNMP declares ``interfaces: [{type: snmp, dns|ip, port}]``.
+
 ``validate()`` checks a spec without talking to Zabbix.  ``plan()`` compares
 a spec with what the API reports and returns a list of ``Change`` objects
 (``create``, ``update`` or ``unchanged``); it only calls ``*.get``.
@@ -35,7 +38,9 @@ VALUE_TYPES = {'float': 0, 'unsigned': 3}
 SEVERITIES = {'not_classified': 0, 'information': 1, 'warning': 2,
               'average': 3, 'high': 4, 'disaster': 5}
 # Host interface types that hosts in a spec may declare.
-INTERFACE_TYPES = {}
+INTERFACE_TYPES = {'snmp': 2}
+# Item fields that are only sent for items of a given type.
+TYPE_FIELDS = {'snmpv2': ('snmp_oid', 'snmp_community')}
 
 DEFAULT_DELAY = 60
 
@@ -185,10 +190,15 @@ def validate(spec):
         if not isinstance(interfaces, list):
             raise SpecError('%s: interfaces must be a list' % label)
         for interface in interfaces:
-            itype = (interface or {}).get('type')
+            interface = interface or {}
+            itype = interface.get('type')
             if itype not in INTERFACE_TYPES:
                 raise SpecError('%s: unsupported interface type %r'
                                 % (label, itype))
+            _require(interface, 'port', '%s: interface' % label)
+            if not (interface.get('dns') or interface.get('ip')):
+                raise SpecError('%s: interface needs a dns name or an ip'
+                                % label)
 
 
 # --- planning ---------------------------------------------------------------
@@ -204,7 +214,22 @@ def _item_params(item):
     }
     if itype != 'trapper':
         params['delay'] = int(item.get('delay', DEFAULT_DELAY))
+    for field in TYPE_FIELDS.get(itype, ()):
+        params[field] = str(item[field])
     return params
+
+
+def _interface_params(interface):
+    """Map a spec interface to a Zabbix ``hostinterface`` object."""
+    ip = interface.get('ip') or ''
+    return {
+        'type': INTERFACE_TYPES[interface['type']],
+        'main': 1,
+        'useip': 1 if ip else 0,
+        'ip': ip,
+        'dns': '' if ip else interface.get('dns') or '',
+        'port': str(interface['port']),
+    }
 
 
 def _normalise(expression):
@@ -299,7 +324,8 @@ def _plan_hosts(zapi, spec, tname, templateid):
                 'host': name,
                 'groups': [{'groupid': Ref('hostgroup', g)}
                            for g in host['groups']],
-                'interfaces': (list(host.get('interfaces') or []) or
+                'interfaces': ([_interface_params(i)
+                                for i in host.get('interfaces') or []] or
                                [dict(TRAPPER_ONLY_INTERFACE)]),
             }
             changes.append(Change('create', 'host', name, 'host.create',
@@ -360,7 +386,8 @@ def plan(zapi, spec):
                                     output=['applicationid', 'name'])
         items = zapi.item.get(hostids=[templateid],
                               output=['itemid', 'key_', 'name', 'type',
-                                      'value_type', 'units', 'delay'],
+                                      'value_type', 'units', 'delay',
+                                      'snmp_oid', 'snmp_community'],
                               selectApplications=['applicationid', 'name'])
         triggers = zapi.trigger.get(hostids=[templateid],
                                     output=['triggerid', 'description',
