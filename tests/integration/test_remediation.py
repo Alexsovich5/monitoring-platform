@@ -4,12 +4,15 @@ the run is recorded in ``monplat.remediations`` and the trigger recovers.
 
 ``/var/spool/mp-demo`` is a named volume mounted in both the ``zabbix``
 container (where the agent polls and deletes) and this test runner."""
+import datetime
 import os
+import threading
 
 import pytest
+import mock
 import requests
 
-from monplat import db
+from monplat import db, events, remediation
 
 from .conftest import STOCK_HOST, intake_headers, wait_for
 
@@ -133,3 +136,58 @@ def test_large_spool_file_is_removed_by_remediation(cfg, zapi):
     assert oks[0]['eventid'] == problems[0]['eventid']
     # The recovery did not start another run.
     assert len(_remediations(cfg, True)) == 1
+
+
+def test_concurrent_duplicates_run_the_script_once_on_postgres(cfg):
+    """Two connections deliver one event at once; the claim row and the
+    advisory lock leave exactly one script.execute."""
+    rules = remediation.load_rules(
+        os.path.join(os.path.dirname(__file__), 'remediation.yml'))
+    host = 'race-host'
+    now = datetime.datetime.now(events.UTC)
+    event = events.Event(eventid=424242, status='PROBLEM', host=host,
+                         trigger_id=13600,
+                         trigger_name='Spool directory too large on race',
+                         severity=2, item_value='1', event_time=now)
+    conn = db.connect(cfg, 'monplat')
+    event_id = events.store(conn, event)
+    conn.close()
+    zapi = mock.MagicMock()
+    zapi.event.get.return_value = [{
+        'eventid': '424242', 'source': '0', 'object': '0',
+        'objectid': '13600', 'value': '1', 'acknowledged': '0',
+        'clock': '1000', 'hosts': [{'hostid': '1', 'host': host}]}]
+    zapi.trigger.get.return_value = [{
+        'triggerid': '13600', 'value': '1', 'lastchange': '1000',
+        'priority': '2',
+        'description': 'Spool directory too large on race'}]
+    zapi.host.get.return_value = [{'hostid': '1', 'host': host,
+                                   'groups': [{'name': 'Linux servers'}]}]
+    zapi.script.get.return_value = [{'scriptid': '5', 'name': SCRIPT}]
+    started = threading.Event()
+
+    def slow_execute(**kwargs):
+        started.set()
+        threading.Event().wait(1)
+        return {'response': 'success', 'value': 'cleared\n'}
+    zapi.script.execute.side_effect = slow_execute
+    rules = [r._replace(allow_hosts=(host,)) for r in rules]
+    results = []
+
+    def deliver():
+        results.append(remediation.remediate(
+            zapi, db.connect(cfg, 'monplat'), event, rules, event_id,
+            now=now))
+    threads = [threading.Thread(target=deliver) for _ in range(2)]
+    for thread in threads:
+        thread.start()
+    for thread in threads:
+        thread.join(30)
+    assert zapi.script.execute.call_count == 1
+    assert sorted(r['ran'] for r in results) == [False, True]
+    conn = db.connect(cfg, 'monplat')
+    cursor = conn.cursor()
+    cursor.execute('SELECT ok, output FROM remediations'
+                   ' WHERE event_id = %s AND ran', (event_id,))
+    assert cursor.fetchall() == [(True, 'cleared\n')]
+    conn.close()

@@ -174,6 +174,8 @@ CREATE TABLE remediations (
   executed_at  timestamp with time zone NOT NULL DEFAULT now()
 );
 CREATE INDEX remediations_host_rule_idx ON remediations (host, rule, executed_at);
+-- A rule runs at most once per event, however often the event is delivered.
+CREATE UNIQUE INDEX remediations_run_once_idx ON remediations (event_id, rule) WHERE ran;
 ```
 
 ### Configuration: `config/monplat.yml`
@@ -356,7 +358,13 @@ trigger event with value PROBLEM, is not acknowledged, belongs to the message's
 `trigger_id` and to exactly one host equal to the message's `host`, its trigger is
 still in PROBLEM with `lastchange` not after the event, and the trigger's own
 name and priority match the rule. The host must be in the rule's allow list.
-Then the cooldown applies. Refusals are stored with `ran = false`.
+Then the run is claimed: in one transaction behind `pg_advisory_xact_lock` on the
+host and rule, the cooldown is checked and a `ran = true` row (`ok = false`, output
+"claimed: ...") is inserted and committed, and only then does `script.execute` run;
+the row is updated with the outcome afterwards. A concurrent duplicate of the same
+event is refused as rate-limited, or, when the cooldown is 0, by the unique index
+`remediations_run_once_idx` on `(event_id, rule)` among `ran` rows. Refusals are
+stored with `ran = false`.
 
 ## Stack & pinned versions
 

@@ -25,3 +25,5 @@ CREATE TABLE remediations (
   executed_at  timestamp with time zone NOT NULL DEFAULT now()
 );
 CREATE INDEX remediations_host_rule_idx ON remediations (host, rule, executed_at);
+-- A rule runs at most once per event, however often the event is delivered.
+CREATE UNIQUE INDEX remediations_run_once_idx ON remediations (event_id, rule) WHERE ran;

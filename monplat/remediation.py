@@ -32,6 +32,13 @@ true, ``ok`` telling whether Zabbix reported success and, if the rule sets
 ``expect_output``, the output contains it) and refusals, including rate
 limiting (``ran`` false).  A rule does not run again for the same host
 until ``cooldown_seconds`` have passed since its last run.
+
+Concurrent deliveries cannot run a script twice.  Before ``script.execute``
+a "claimed" row (``ran`` true) is committed in the same transaction as the
+cooldown check, behind ``pg_advisory_xact_lock`` on the host and rule; the
+row is updated with the outcome afterwards.  A unique index on
+``(event_id, rule)`` among ``ran`` rows also stops one event from running a
+rule twice when the cooldown is 0.
 """
 import collections
 import datetime
@@ -39,6 +46,7 @@ import logging
 import os
 import re
 
+import psycopg2
 import yaml
 
 from monplat.events import UTC
@@ -61,6 +69,11 @@ _REQUIRED = ('name', 'trigger_match', 'min_severity', 'script', 'command',
 _RECENT_RUN = ('SELECT 1 FROM remediations '
                'WHERE host = %s AND rule = %s AND executed_at > %s AND ran '
                'LIMIT 1')
+_LOCK = 'SELECT pg_advisory_xact_lock(hashtext(%s))'
+_FINISH = ('UPDATE remediations SET ok = %s, output = %s, '
+           'executed_at = now() '
+           'WHERE event_id = %s AND rule = %s AND ran')
+CLAIMED = 'claimed: script not finished'
 _INSERT = ('INSERT INTO remediations '
            '(event_id, rule, host, script_name, ok, output, ran) '
            'VALUES (%s, %s, %s, %s, %s, %s, %s)')
@@ -177,6 +190,44 @@ def in_cooldown(conn, host, rule, now):
     try:
         cursor.execute(_RECENT_RUN, (host, rule.name, since))
         return cursor.fetchone() is not None
+    finally:
+        cursor.close()
+
+
+def claim(conn, event_id, rule, host, now):
+    """Reserve the run of ``rule`` on ``host`` for event row ``event_id``
+    and commit the reservation, or raise ``Refused``.  The cooldown check
+    and the insert share one transaction behind an advisory lock on
+    ``host`` and ``rule``, so two deliveries cannot both pass."""
+    cursor = conn.cursor()
+    try:
+        cursor.execute(_LOCK, ('%s/%s' % (host, rule.name),))
+        if in_cooldown(conn, host, rule, now):
+            conn.rollback()
+            raise Refused('rate-limited: %s ran for %s within the last '
+                          '%d s' % (rule.name, host, rule.cooldown_seconds))
+        try:
+            cursor.execute(_INSERT, (event_id, rule.name, host, rule.script,
+                                     False, CLAIMED, True))
+        except psycopg2.IntegrityError:
+            conn.rollback()
+            raise Refused('%s already ran for this event' % rule.name)
+        conn.commit()
+    except Refused:
+        raise
+    except Exception:
+        conn.rollback()
+        raise
+    finally:
+        cursor.close()
+
+
+def finish(conn, event_id, rule, ok, output):
+    """Store the outcome of the run claimed with ``claim``."""
+    cursor = conn.cursor()
+    try:
+        cursor.execute(_FINISH, (ok, output, event_id, rule.name))
+        conn.commit()
     finally:
         cursor.close()
 
@@ -301,15 +352,15 @@ def remediate(zapi, conn, event, rules, event_id, now=None):
         return _refuse(conn, event_id, rule, event.host,
                        'cannot confirm the event with Zabbix: %s: %s'
                        % (type(exc).__name__, exc))
-    if in_cooldown(conn, host, rule, now):
-        return _refuse(conn, event_id, rule, host,
-                       'rate-limited: %s ran for %s within the last %d s'
-                       % (rule.name, host, rule.cooldown_seconds))
+    try:
+        claim(conn, event_id, rule, host, now)
+    except Refused as exc:
+        return _refuse(conn, event_id, rule, host, str(exc))
     try:
         ok, output = _execute(zapi, rule, hostid)
     except Exception as exc:  # API errors, timeouts, refused connections
         ok, output = False, '%s: %s' % (type(exc).__name__, exc)
-    record(conn, event_id, rule, host, ok, output, ran=True)
+    finish(conn, event_id, rule, ok, output)
     if ok:
         log.info('remediation %s on %s succeeded', rule.name, host)
     else:

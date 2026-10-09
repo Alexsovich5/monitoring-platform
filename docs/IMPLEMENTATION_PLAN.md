@@ -368,12 +368,15 @@ Conventions used in every task:
   - create `config/templates/mp-spool.yml` (`Template MP Spool`, linked to the existing `Zabbix server` host with `host.massadd`, so Template OS Linux stays linked: agent item `vfs.file.size[/var/spool/mp-demo/blob]` with `delay` 30 and trigger `Spool directory too large on {HOST.NAME}` when `.last()>5242880`, severity warning). The agent key is `vfs.file.size` because Zabbix 2.4 has no `vfs.dir.size`.
   - create `tests/unit/test_remediation.py` and `tests/integration/test_remediation.py`; update the provision CLI tests in `tests/unit/test_templates.py` (one more created object) and `tests/unit/test_dashboards.py` (the new template also yields `grafana/dashboards/mp-spool.json`, generated with `mpctl dashboards`)
   - `config/remediation.yml` carries `command: "rm -f /var/spool/mp-demo/* && echo cleared"` and `expect_output: cleared`; `mpctl provision` gains `--remediation FILE` (default `config/remediation.yml`) and runs `actions.plan_scripts` after the action
+  - the run is claimed before it executes: cooldown check plus a committed `ran = true` row inside one transaction behind `pg_advisory_xact_lock(hashtext('<host>/<rule>'))`, then `UPDATE` with the outcome; `sql/monplat_schema.sql` has a unique index on `remediations (event_id, rule) WHERE ran`, so a duplicate delivery is refused even with a 0 cooldown
   - `remediate` takes the stored `events` row id (`event_id`) for the `remediations` foreign key; the API connects to the Zabbix API only when a rule matches, and records a failed login as an `ok=false` run
   - modify `docker/zabbix/entrypoint.sh` to set `config.refresh_unsupported = 30` on every start. `vfs.file.size` on a missing file makes the item unsupported, which Zabbix only rechecks every 600 s by default; an unsupported item also leaves the trigger in PROBLEM, so after the remediation the test writes an empty `blob` and the item reports 0, which produces the OK event
 - **Tests first:**
   - unit: the rule regex and minimum severity match
   - unit: OK events never remediate
   - unit: cooldown blocks a second run inside `cooldown_seconds` (remediations table mocked)
+  - unit: two threads delivering the same event run `script.execute` once (the first holds the claim while its script is running), also with `cooldown_seconds: 0`
+  - integration: two connections racing on the real `remediations` table run the script once
   - unit: a `script.execute` failure, or output without `cleared`, is logged with `ok=false`
   - integration: write a 10 MB `/var/spool/mp-demo/blob` through the shared volume. Within 180 s there is a `remediations` row with `ok=true` for host `Zabbix server`, the file is gone from the shared volume, and, after an empty `blob` is written, a later OK event is recorded.
 - **Acceptance:** `make build && make test`

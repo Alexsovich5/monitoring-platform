@@ -69,7 +69,8 @@ Personal project built on the 2014-era stack (Zabbix 2.4.3, Python 2.7, PostgreS
 - Auto-remediation: opt-in rules in `config/remediation.yml` run Zabbix
   global scripts through `script.execute` once the Zabbix API confirms the
   event as a current, unacknowledged PROBLEM on a host in the rule's allow
-  list, with a per-host, per-rule cooldown; runs and refusals are both
+  list, with a per-host, per-rule cooldown that concurrent deliveries of one
+  event cannot bypass (the run is claimed in the database before it executes); runs and refusals are both
   recorded: `monplat/remediation.py`; tested by
   `tests/unit/test_remediation.py` and `tests/integration/test_remediation.py`
   (with `tests/integration/remediation.yml`, which enables the rule).

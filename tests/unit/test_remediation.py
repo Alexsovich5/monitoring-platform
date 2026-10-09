@@ -1,8 +1,10 @@
 import datetime
 import json
 import os
+import threading
 
 import mock
+import psycopg2
 import pytest
 from pyzabbix import ZabbixAPIException
 
@@ -102,9 +104,15 @@ def zabbix(execute=None, scripts=None, zevent=None, trigger=None,
 
 
 def audit_rows(cursor):
-    """The parameters of every INSERT into remediations:
-    (event_id, rule, host, script, ok, output, ran)."""
-    return [params for sql, params in sql_calls(cursor, 'INSERT')]
+    """One tuple per remediations row written through ``cursor``:
+    (event_id, rule, host, script, ok, output, ran), with the outcome that
+    an UPDATE recorded for a claimed run applied."""
+    rows = [list(params) for sql, params in sql_calls(cursor, 'INSERT')]
+    for sql, (ok, output, event_id, rule) in sql_calls(cursor, 'UPDATE'):
+        for row in rows:
+            if row[0] == event_id and row[1] == rule and row[6]:
+                row[4], row[5] = ok, output
+    return [tuple(row) for row in rows]
 
 
 # --- rules -------------------------------------------------------------------
@@ -222,6 +230,130 @@ def test_second_run_inside_the_window_is_rate_limited_and_audited(rules):
     assert 'rate-limited' in rows[0][5]
 
 
+class FakeDb(object):
+    """The parts of PostgreSQL the claim relies on: ``remediations`` rows
+    shared between connections, a unique (event_id, rule) among ran rows
+    and transaction-scoped advisory locks."""
+
+    def __init__(self):
+        self.rows = []
+        self.mutex = threading.Lock()
+        self.locks = {}
+
+    def connect(self):
+        return FakeConn(self)
+
+
+class FakeConn(object):
+    def __init__(self, db):
+        self.db = db
+        self.held = []
+
+    def cursor(self):
+        return FakeCursor(self)
+
+    def _release(self):
+        while self.held:
+            self.held.pop().release()
+
+    commit = rollback = _release
+
+
+class FakeCursor(object):
+    def __init__(self, conn):
+        self.conn = conn
+        self.found = None
+
+    def close(self):
+        pass
+
+    def fetchone(self):
+        return self.found
+
+    def execute(self, sql, params=()):
+        db = self.conn.db
+        sql = ' '.join(sql.split())
+        if 'pg_advisory_xact_lock' in sql:
+            with db.mutex:
+                lock = db.locks.setdefault(params[0], threading.Lock())
+            lock.acquire()
+            self.conn.held.append(lock)
+        elif sql.startswith('SELECT 1 FROM remediations'):
+            host, rule, since = params
+            hit = [r for r in db.rows if r['host'] == host and
+                   r['rule'] == rule and r['ran'] and r['at'] > since]
+            self.found = (1,) if hit else None
+        elif sql.startswith('INSERT INTO remediations'):
+            event_id, rule, host, script, ok, output, ran = params
+            if ran and any(r['event_id'] == event_id and r['rule'] == rule
+                           and r['ran'] for r in db.rows):
+                raise psycopg2.IntegrityError('remediations_run_once_idx')
+            db.rows.append({'event_id': event_id, 'rule': rule,
+                            'host': host, 'ok': ok, 'output': output,
+                            'ran': ran, 'at': NOW})
+        elif sql.startswith('UPDATE remediations'):
+            ok, output, event_id, rule = params
+            for r in db.rows:
+                if (r['event_id'], r['rule'], r['ran']) == (
+                        event_id, rule, True):
+                    r['ok'], r['output'] = ok, output
+        else:
+            raise AssertionError('unexpected SQL: %s' % sql)
+
+
+def _race(rules, ev, cooldown_rules=None):
+    """Deliver ``ev`` from two threads while the first script.execute is
+    still running; returns ``(results, zapi, db)``."""
+    db = FakeDb()
+    zapi = zabbix()
+    started = threading.Event()
+    release = threading.Event()
+
+    def slow_execute(**kwargs):
+        started.set()
+        release.wait(10)
+        return {'response': 'success', 'value': 'cleared\n'}
+    zapi.script.execute.side_effect = slow_execute
+    results = []
+
+    def deliver():
+        results.append(remediation.remediate(
+            zapi, db.connect(), ev, cooldown_rules or rules, event_id=7,
+            now=NOW))
+    threads = [threading.Thread(target=deliver) for _ in range(2)]
+    threads[0].start()
+    assert started.wait(10)
+    threads[1].start()
+    threads[1].join(10)
+    release.set()
+    threads[0].join(10)
+    assert not any(t.is_alive() for t in threads)
+    return results, zapi, db
+
+
+def test_concurrent_duplicates_of_one_event_run_the_script_once(rules):
+    results, zapi, db = _race(rules, event())
+    assert zapi.script.execute.call_count == 1
+    assert sorted(r['ran'] for r in results) == [False, True]
+    refused = [r for r in results if not r['ran']][0]
+    assert 'rate-limited' in refused['output']
+    ran = [r for r in db.rows if r['ran']]
+    assert len(ran) == 1 and ran[0]['ok'] is True
+    assert ran[0]['output'] == 'cleared\n'
+
+
+def test_duplicate_event_is_refused_even_without_a_cooldown(tmpdir):
+    rules = load(tmpdir, RULES_YAML.replace('cooldown_seconds: 600',
+                                            'cooldown_seconds: 0'))
+    results, zapi, db = _race(rules, event())
+    assert zapi.script.execute.call_count == 1
+    refused = [r for r in results if not r['ran']]
+    assert len(refused) == 1
+    assert 'already' in refused[0]['output']
+    assert len([r for r in db.rows if r['ran']]) == 1
+    assert len([r for r in db.rows if not r['ran']]) == 1
+
+
 # --- running the script ------------------------------------------------------
 
 def test_verified_problem_runs_once_on_the_zabbix_hostid(rules):
@@ -245,6 +377,29 @@ def test_verified_problem_runs_once_on_the_zabbix_hostid(rules):
     sql = sql_calls(cursor, 'INSERT')[0][0]
     assert 'INTO remediations' in sql
     assert conn.commit.called
+
+
+def test_run_is_claimed_under_a_host_and_rule_lock_before_executing(rules):
+    """The cooldown check and the claiming INSERT happen in one
+    transaction behind an advisory lock, and are committed before
+    ``script.execute`` is called."""
+    zapi = zabbix()
+    conn, cursor = cursor_conn(fetchone=None)
+    seen = []
+    zapi.script.execute.side_effect = lambda **kw: (
+        seen.append(len(sql_calls(cursor, 'INSERT'))) or
+        {'response': 'success', 'value': 'cleared\n'})
+    remediation.remediate(zapi, conn, event(), rules, event_id=7, now=NOW)
+    statements = [c[0][0].lstrip().split()[0].upper()
+                  for c in cursor.execute.call_args_list]
+    assert statements == ['SELECT', 'SELECT', 'INSERT', 'UPDATE']
+    lock_sql, lock_params = cursor.execute.call_args_list[0][0]
+    assert 'pg_advisory_xact_lock' in lock_sql
+    assert lock_params == ('Zabbix server/clear-spool',)
+    assert seen == [1], 'the claim is stored before the script runs'
+    assert conn.commit.call_count == 2
+
+
 
 
 def _refused(zapi, rules, ev=None):
